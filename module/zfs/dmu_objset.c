@@ -719,6 +719,8 @@ dmu_objset_evict_dbufs(objset_t *os)
 		 * hold.  If the dnode has no holds, then it has no dbufs.
 		 */
 		if (dnode_add_ref(dn, FTAG)) {
+ 			dnode_hash_remove(dn);
+
 			list_insert_after(&os->os_dnodes, dn, dn_marker);
 			mutex_exit(&os->os_lock);
 
@@ -729,6 +731,8 @@ dmu_objset_evict_dbufs(objset_t *os)
 			dn = list_next(&os->os_dnodes, dn_marker);
 			list_remove(&os->os_dnodes, dn_marker);
 		} else {
+			if (dn->dn_hashed)
+                                dnode_hash_remove(dn);
 			dn = list_next(&os->os_dnodes, dn);
 		}
 	}

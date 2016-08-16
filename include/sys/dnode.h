@@ -199,6 +199,9 @@ struct dnode {
 	/* Our link on dn_objset->os_dnodes list; protected by os_lock.  */
 	list_node_t dn_link;
 
+	/* protected by hash lock */
+	struct dnode *dn_hash_next;
+
 	/* immutable: */
 	struct objset *dn_objset;
 	uint64_t dn_object;
@@ -223,6 +226,7 @@ struct dnode {
 	uint8_t dn_moved;		/* Has this dnode been moved? */
 	uint16_t dn_datablkszsec;	/* in 512b sectors */
 	uint32_t dn_datablksz;		/* in bytes */
+	uint8_t dn_hashed;		/* is in dnode hash table? */
 	uint64_t dn_maxblkid;
 	uint8_t dn_next_type[TXG_SIZE];
 	uint8_t dn_num_slots;		/* metadnode slots consumed on disk */
@@ -321,6 +325,7 @@ void dnode_setbonuslen(dnode_t *dn, int newsize, dmu_tx_t *tx);
 void dnode_setbonus_type(dnode_t *dn, dmu_object_type_t, dmu_tx_t *tx);
 void dnode_rm_spill(dnode_t *dn, dmu_tx_t *tx);
 
+void dnode_hash_remove(dnode_t *dn);
 int dnode_hold(struct objset *dd, uint64_t object,
     void *ref, dnode_t **dnp);
 int dnode_hold_impl(struct objset *dd, uint64_t object, int flag, int dn_slots,

@@ -59,9 +59,113 @@ ASSERTV(static dnode_phys_t dnode_phys_zero);
 int zfs_default_bs = SPA_MINBLOCKSHIFT;
 int zfs_default_ibs = DN_MAX_INDBLKSHIFT;
 
+#define	DNODE_MUTEXES 256
+#define	DNODE_HASH_MUTEX(h, idx) \
+    (&(h)->hash_mutexes[(idx) & (DNODE_MUTEXES-1)])
+
+typedef struct dnode_hash_table {
+	uint64_t hash_table_mask;
+	dnode_t **hash_table;
+	kmutex_t hash_mutexes[DNODE_MUTEXES];
+} dnode_hash_table_t;
+
+static dnode_hash_table_t dnode_hash_table;
+
 #ifdef	_KERNEL
 static kmem_cbrc_t dnode_move(void *, void *, size_t, void *);
 #endif /* _KERNEL */
+
+static uint64_t
+dnode_hash(void *os, uint64_t obj)
+{
+	uintptr_t osv = (uintptr_t)os;
+	uint64_t crc = -1ULL;
+
+	ASSERT(zfs_crc64_table[128] == ZFS_CRC64_POLY);
+	crc = (crc >> 8) ^ zfs_crc64_table[(crc ^ (obj >> 0)) & 0xFF];
+	crc = (crc >> 8) ^ zfs_crc64_table[(crc ^ (obj >> 8)) & 0xFF];
+	crc = (crc >> 8) ^ zfs_crc64_table[(crc ^ (obj >> 16)) & 0xFF];
+
+	crc ^= (osv>>14) ^ (obj>>16);
+
+	return (crc);
+}
+
+#define	DNODE_EQUAL(dn, os, obj)		\
+	((dn)->dn_objset == (os) &&		\
+	(dn)->dn_object == (obj))
+
+static dnode_t *
+dnode_find(objset_t *os, uint64_t obj)
+{
+	dnode_hash_table_t *h = &dnode_hash_table;
+	uint64_t hv = dnode_hash(os, obj);
+	uint64_t idx = hv & h->hash_table_mask;
+	dnode_t *dn;
+
+	mutex_enter(DNODE_HASH_MUTEX(h, idx));
+	for (dn = h->hash_table[idx]; dn != NULL; dn = dn->dn_hash_next) {
+		if (DNODE_EQUAL(dn, os, obj)) {
+			mutex_exit(DNODE_HASH_MUTEX(h, idx));
+			ASSERT(dn->dn_hashed);
+			ASSERT(dn->dn_dbuf == NULL || !refcount_is_zero(&dn->dn_dbuf->db_holds));
+			return (dn);
+		}
+	}
+	mutex_exit(DNODE_HASH_MUTEX(h, idx));
+	return (NULL);
+}
+
+static void
+dnode_hash_insert(dnode_t *dn)
+{
+	dnode_hash_table_t *h = &dnode_hash_table;
+	objset_t *os = dn->dn_objset;
+	uint64_t obj = dn->dn_object;
+	uint64_t hv = dnode_hash(os, obj);
+	uint64_t idx = hv & h->hash_table_mask;
+	dnode_t *dnf;
+
+	ASSERT(dn->dn_dbuf == NULL || !refcount_is_zero(&dn->dn_dbuf->db_holds));
+
+	mutex_enter(DNODE_HASH_MUTEX(h, idx));
+	for (dnf = h->hash_table[idx]; dnf != NULL; dnf = dnf->dn_hash_next) {
+		ASSERT(!DNODE_EQUAL(dnf, os, obj));
+	}
+
+	dn->dn_hash_next = h->hash_table[idx];
+	h->hash_table[idx] = dn;
+	dn->dn_hashed = B_TRUE;
+	mutex_exit(DNODE_HASH_MUTEX(h, idx));
+}
+
+/*
+ * Remove an entry from the hash table.
+ */
+void
+dnode_hash_remove(dnode_t *dn)
+{
+	dnode_hash_table_t *h = &dnode_hash_table;
+	uint64_t hv = dnode_hash(dn->dn_objset, dn->dn_object);
+	uint64_t idx = hv & h->hash_table_mask;
+	dnode_t *dnf, **dnp;
+
+	ASSERT(dn->dn_hashed);
+
+	mutex_enter(DNODE_HASH_MUTEX(h, idx));
+	dnp = &h->hash_table[idx];
+	while ((dnf = *dnp) != dn) {
+		dnp = &dnf->dn_hash_next;
+		ASSERT(dnf != NULL);
+	}
+	*dnp = dn->dn_hash_next;
+	dn->dn_hash_next = NULL;
+	dn->dn_hashed = B_FALSE;
+	mutex_exit(DNODE_HASH_MUTEX(h, idx));
+
+	if (dn->dn_dbuf != NULL)
+                dbuf_rele(dn->dn_dbuf, h);
+}
 
 static int
 dbuf_compare(const void *x1, const void *x2)
@@ -104,7 +208,8 @@ dnode_cons(void *arg, void *unused, int kmflag)
 	 * Every dbuf has a reference, and dropping a tracked reference is
 	 * O(number of references), so don't track dn_holds.
 	 */
-	refcount_create_untracked(&dn->dn_holds);
+	/*refcount_create_untracked(&dn->dn_holds);*/
+	refcount_create(&dn->dn_holds);
 	refcount_create(&dn->dn_tx_holds);
 	list_link_init(&dn->dn_link);
 
@@ -139,6 +244,7 @@ dnode_cons(void *arg, void *unused, int kmflag)
 	dn->dn_newuid = 0;
 	dn->dn_newgid = 0;
 	dn->dn_id_flags = 0;
+	dn->dn_hashed = 0;
 
 	dn->dn_dbufs_count = 0;
 	dn->dn_unlisted_l0_blkid = 0;
@@ -204,7 +310,30 @@ dnode_init(void)
 	ASSERT(dnode_cache == NULL);
 	dnode_cache = kmem_cache_create("dnode_t", sizeof (dnode_t),
 	    0, dnode_cons, dnode_dest, NULL, NULL, NULL, 0);
-	kmem_cache_set_move(dnode_cache, dnode_move);
+	/*kmem_cache_set_move(dnode_cache, dnode_move);*/
+
+	uint64_t hsize = 1ULL << 16;
+	dnode_hash_table_t *h = &dnode_hash_table;
+	int i;
+
+	/*
+	 * The hash table is big enough to fill 1/4 all of physical memory
+	 * with dnodes.
+	 */
+	while (hsize * sizeof(dnode_t) < physmem * PAGESIZE / 4)
+		hsize <<= 1;
+
+retry:
+	h->hash_table_mask = hsize - 1;
+	h->hash_table = kmem_zalloc(hsize * sizeof (void *), KM_NOSLEEP);
+	if (h->hash_table == NULL) {
+		/* XXX - we should really return an error instead of assert */
+		ASSERT(hsize > (1ULL << 10));
+		hsize >>= 1;
+		goto retry;
+	}
+	for (i = 0; i < DNODE_MUTEXES; i++)
+		mutex_init(&h->hash_mutexes[i], NULL, MUTEX_DEFAULT, NULL);
 }
 
 void
@@ -212,6 +341,10 @@ dnode_fini(void)
 {
 	kmem_cache_destroy(dnode_cache);
 	dnode_cache = NULL;
+	dnode_hash_table_t *h = &dnode_hash_table;
+	for (int i = 0; i < DNODE_MUTEXES; i++)
+		mutex_destroy(&h->hash_mutexes[i]);
+	kmem_free(h->hash_table, (h->hash_table_mask + 1) * sizeof (void *));
 }
 
 
@@ -452,6 +585,10 @@ dnode_create(objset_t *os, dnode_phys_t *dnp, dmu_buf_impl_t *db,
 	 */
 	if (!DMU_OBJECT_IS_SPECIAL(object))
 		list_insert_head(&os->os_dnodes, dn);
+
+	if (dn->dn_dbuf != NULL) {
+                dmu_buf_add_ref(&dn->dn_dbuf->db, &dnode_hash_table);
+	}
 	membar_producer();
 
 	/*
@@ -462,6 +599,10 @@ dnode_create(objset_t *os, dnode_phys_t *dnp, dmu_buf_impl_t *db,
 
 	dnh->dnh_dnode = dn;
 	mutex_exit(&os->os_lock);
+
+	if (dn->dn_dbuf != NULL) {
+                dnode_hash_insert(dn);
+	}
 
 	arc_space_consume(sizeof (dnode_t), ARC_SPACE_DNODE);
 	return (dn);
@@ -477,6 +618,7 @@ dnode_destroy(dnode_t *dn)
 	boolean_t complete_os_eviction = B_FALSE;
 
 	ASSERT((dn->dn_id_flags & DN_ID_NEW_EXIST) == 0);
+	ASSERT0(dn->dn_hashed);
 
 	mutex_enter(&os->os_lock);
 	POINTER_INVALIDATE(&dn->dn_objset);
@@ -695,6 +837,7 @@ dnode_reallocate(dnode_t *dn, dmu_object_type_t ot, int blocksize,
 	mutex_exit(&dn->dn_mtx);
 }
 
+#if 0 /* XXX need to add support for dn_hash_next */
 #ifdef	_KERNEL
 #ifdef	DNODE_STATS
 static struct {
@@ -987,6 +1130,7 @@ dnode_move(void *buf, void *newbuf, size_t size, void *arg)
 	return (KMEM_CBRC_YES);
 }
 #endif	/* _KERNEL */
+#endif
 
 void
 dnode_special_close(dnode_handle_t *dnh)
@@ -1050,6 +1194,8 @@ dnode_buf_pageout(void *dbu)
 		 */
 		ASSERT(refcount_is_zero(&dn->dn_holds));
 		ASSERT(refcount_is_zero(&dn->dn_tx_holds));
+
+		ASSERT(!dn->dn_hashed);
 
 		dnode_destroy(dn); /* implicit zrl_remove() */
 		zrl_destroy(&dnh->dnh_zrlock);
@@ -1232,6 +1378,25 @@ dnode_hold_impl(objset_t *os, uint64_t object, int flag, int slots,
 
 	if (object == 0 || object >= DN_MAX_OBJECT)
 		return (SET_ERROR(EINVAL));
+
+	dn = dnode_find(os, object);
+	if (dn != NULL) {
+                mutex_enter(&dn->dn_mtx);
+                type = dn->dn_type;
+                if (dn->dn_free_txg ||
+                    ((flag & DNODE_MUST_BE_ALLOCATED) && type == DMU_OT_NONE) ||
+                    ((flag & DNODE_MUST_BE_FREE) &&
+                    (type != DMU_OT_NONE || !refcount_is_zero(&dn->dn_holds)))) {
+                        mutex_exit(&dn->dn_mtx);
+                        return (type == DMU_OT_NONE ? ENOENT : EEXIST);
+                }
+                VERIFY(dn->dn_hashed);
+                if (refcount_add(&dn->dn_holds, tag) == 1)
+                        dbuf_add_ref(dn->dn_dbuf, dn->dn_handle);
+                mutex_exit(&dn->dn_mtx);
+                *dnp = dn;
+                return (0);
+	}
 
 	mdn = DMU_META_DNODE(os);
 	ASSERT(mdn->dn_object == DMU_META_DNODE_OBJECT);
