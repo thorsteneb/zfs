@@ -339,10 +339,11 @@ retry:
 void
 dnode_fini(void)
 {
+	int i;
 	kmem_cache_destroy(dnode_cache);
 	dnode_cache = NULL;
 	dnode_hash_table_t *h = &dnode_hash_table;
-	for (int i = 0; i < DNODE_MUTEXES; i++)
+	for (i = 0; i < DNODE_MUTEXES; i++)
 		mutex_destroy(&h->hash_mutexes[i]);
 	kmem_free(h->hash_table, (h->hash_table_mask + 1) * sizeof (void *));
 }
