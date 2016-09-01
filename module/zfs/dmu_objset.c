@@ -515,6 +515,11 @@ dmu_objset_open_impl(spa_t *spa, dsl_dataset_t *ds, blkptr_t *bp,
 	mutex_init(&os->os_obj_lock, NULL, MUTEX_DEFAULT, NULL);
 	mutex_init(&os->os_user_ptr_lock, NULL, MUTEX_DEFAULT, NULL);
 
+	for (i = 0; i < NUM_ALLOCATORS; i++) {
+		mutex_init(&os->os_obj_alloc[i].oa_lock,
+		    NULL, MUTEX_DEFAULT, NULL);
+	}
+
 	dnode_special_open(os, &os->os_phys->os_meta_dnode,
 	    DMU_META_DNODE_OBJECT, &os->os_meta_dnode);
 	if (arc_buf_size(os->os_phys_buf) >= sizeof (objset_phys_t)) {

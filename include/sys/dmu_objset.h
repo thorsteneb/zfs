@@ -71,6 +71,13 @@ typedef struct objset_phys {
 
 typedef int (*dmu_objset_upgrade_cb_t)(objset_t *);
 
+typedef struct object_allocator {
+	kmutex_t oa_lock;
+	uint64_t oa_next_obj;
+} object_allocator_t;
+
+#define NUM_ALLOCATORS 16
+
 struct objset {
 	/* Immutable: */
 	struct dsl_dataset *os_dsl_dataset;
@@ -116,6 +123,8 @@ struct objset {
 	/* Protected by os_obj_lock */
 	kmutex_t os_obj_lock;
 	uint64_t os_obj_next;
+
+	object_allocator_t os_obj_alloc[NUM_ALLOCATORS];
 
 	/* Protected by os_lock */
 	kmutex_t os_lock;

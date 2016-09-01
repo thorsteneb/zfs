@@ -50,6 +50,10 @@ dmu_object_alloc_dnsize(objset_t *os, dmu_object_type_t ot, int blocksize,
 	dnode_t *dn = NULL;
 	int dn_slots = dnodesize >> DNODE_SHIFT;
 	boolean_t restarted = B_FALSE;
+	int idx = CPU_SEQID % NUM_ALLOCATORS;
+	object_allocator_t *oa = &os->os_obj_alloc[idx];
+  
+	mutex_enter(&oa->oa_lock);
 
 	if (dn_slots == 0) {
 		dn_slots = DNODE_MIN_SLOTS;
@@ -58,9 +62,8 @@ dmu_object_alloc_dnsize(objset_t *os, dmu_object_type_t ot, int blocksize,
 		ASSERT3S(dn_slots, <=, DNODE_MAX_SLOTS);
 	}
 
-	mutex_enter(&os->os_obj_lock);
 	for (;;) {
-		object = os->os_obj_next;
+		object = oa->oa_next_obj;
 		/*
 		 * Each time we polish off a L1 bp worth of dnodes (2^12
 		 * objects), move to another L1 bp that's still
@@ -105,7 +108,17 @@ dmu_object_alloc_dnsize(objset_t *os, dmu_object_type_t ot, int blocksize,
 			if (error == 0)
 				object = offset >> DNODE_SHIFT;
 		}
-		os->os_obj_next = object + dn_slots;
+		oa->oa_next_obj = object + dn_slots;
+
+		/*
+		 * If we are on the wrong L0 for this CPU, go to our next
+		 * eligible L0.
+		 */
+		if ((oa->oa_next_obj / 32) % NUM_ALLOCATORS != idx) {
+			oa->oa_next_obj = P2PHASEUP(oa->oa_next_obj,
+			    32 * NUM_ALLOCATORS, 32 * idx);
+		}
+		ASSERT3U((oa->oa_next_obj / 32) % NUM_ALLOCATORS, ==, idx);
 
 		/*
 		 * XXX We should check for an i/o error here and return
@@ -119,19 +132,19 @@ dmu_object_alloc_dnsize(objset_t *os, dmu_object_type_t ot, int blocksize,
 			break;
 
 		if (dmu_object_next(os, &object, B_TRUE, 0) == 0)
-			os->os_obj_next = object;
+			oa->oa_obj_next = object;
 		else
 			/*
 			 * Skip to next known valid starting point for a dnode.
 			 */
-			os->os_obj_next = P2ROUNDUP(object + 1,
+			oa->oa_obj_next = P2ROUNDUP(object + 1,
 			    DNODES_PER_BLOCK);
 	}
 
 	dnode_allocate(dn, ot, blocksize, 0, bonustype, bonuslen, dn_slots, tx);
 	dnode_rele(dn, FTAG);
 
-	mutex_exit(&os->os_obj_lock);
+	mutex_exit(&oa->oa_obj_lock);
 
 	dmu_tx_add_new_object(tx, os, object);
 	return (object);
