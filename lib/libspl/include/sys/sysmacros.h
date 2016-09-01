@@ -62,6 +62,8 @@
 #define	P2NPHASE(x, align)	(-(x) & ((align) - 1))
 #define	P2NPHASE_TYPED(x, align, type) \
 				(-(type)(x) & ((type)(align) - 1))
+#define	P2PHASEUP(x, align, phase) \
+				((phase) - (((phase) - (x)) & -(align)))
 #define	ISP2(x)			(((x) & ((x) - 1)) == 0)
 #define	IS_P2ALIGNED(v, a)	((((uintptr_t)(v)) & ((uintptr_t)(a) - 1)) == 0)
 

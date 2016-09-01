@@ -132,19 +132,19 @@ dmu_object_alloc_dnsize(objset_t *os, dmu_object_type_t ot, int blocksize,
 			break;
 
 		if (dmu_object_next(os, &object, B_TRUE, 0) == 0)
-			oa->oa_obj_next = object;
+			oa->oa_next_obj = object;
 		else
 			/*
 			 * Skip to next known valid starting point for a dnode.
 			 */
-			oa->oa_obj_next = P2ROUNDUP(object + 1,
+			oa->oa_next_obj = P2ROUNDUP(object + 1,
 			    DNODES_PER_BLOCK);
 	}
 
 	dnode_allocate(dn, ot, blocksize, 0, bonustype, bonuslen, dn_slots, tx);
 	dnode_rele(dn, FTAG);
 
-	mutex_exit(&oa->oa_obj_lock);
+	mutex_exit(&oa->oa_lock);
 
 	dmu_tx_add_new_object(tx, os, object);
 	return (object);
