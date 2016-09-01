@@ -2234,11 +2234,11 @@ zfs_zaccess_aces_check(znode_t *zp, uint32_t *working_mode,
 
 	zfs_fuid_map_ids(zp, cr, &fowner, &gowner);
 
-	mutex_enter(&zp->z_acl_lock);
+	/*mutex_enter(&zp->z_acl_lock);*/
 
 	error = zfs_acl_node_read(zp, B_FALSE, &aclp, B_FALSE);
 	if (error != 0) {
-		mutex_exit(&zp->z_acl_lock);
+		/*mutex_exit(&zp->z_acl_lock);*/
 		return (error);
 	}
 
@@ -2291,7 +2291,7 @@ zfs_zaccess_aces_check(znode_t *zp, uint32_t *working_mode,
 					checkit = B_TRUE;
 				break;
 			} else {
-				mutex_exit(&zp->z_acl_lock);
+				/*mutex_exit(&zp->z_acl_lock);*/
 				return (SET_ERROR(EIO));
 			}
 		}
@@ -2309,7 +2309,7 @@ zfs_zaccess_aces_check(znode_t *zp, uint32_t *working_mode,
 				    zfs_ace_hdr_t *, acep,
 				    uint32_t, mask_matched);
 				if (anyaccess) {
-					mutex_exit(&zp->z_acl_lock);
+					/*mutex_exit(&zp->z_acl_lock);*/
 					return (0);
 				}
 			}
@@ -2321,7 +2321,7 @@ zfs_zaccess_aces_check(znode_t *zp, uint32_t *working_mode,
 			break;
 	}
 
-	mutex_exit(&zp->z_acl_lock);
+	/*mutex_exit(&zp->z_acl_lock);*/
 
 	/* Put the found 'denies' back on the working mode */
 	if (deny_mask) {
