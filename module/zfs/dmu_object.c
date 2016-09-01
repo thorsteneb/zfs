@@ -32,6 +32,8 @@
 #include <sys/zfeature.h>
 #include <sys/dsl_dataset.h>
 
+#define	P2PHASEUP(x, align, phase)	((phase) - (((phase) - (x)) & -(align)))
+
 uint64_t
 dmu_object_alloc(objset_t *os, dmu_object_type_t ot, int blocksize,
     dmu_object_type_t bonustype, int bonuslen, dmu_tx_t *tx)
