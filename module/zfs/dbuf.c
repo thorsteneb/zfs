@@ -1003,7 +1003,8 @@ dbuf_read_done(zio_t *zio, arc_buf_t *buf, void *vdb)
 }
 
 static int
-dbuf_read_impl(dmu_buf_impl_t *db, zio_t *zio, uint32_t flags)
+dbuf_read_impl(dmu_buf_impl_t *db, const blkptr_t *bp,
+    zio_t *zio, uint32_t flags)
 {
 	dnode_t *dn;
 	zbookmark_phys_t zb;
@@ -1013,10 +1014,13 @@ dbuf_read_impl(dmu_buf_impl_t *db, zio_t *zio, uint32_t flags)
 	DB_DNODE_ENTER(db);
 	dn = DB_DNODE(db);
 	ASSERT(!refcount_is_zero(&db->db_holds));
-	/* We need the struct_rwlock to prevent db_blkptr from changing. */
+	/*
+	 * bp is typically db_blkptr; we need the struct_rwlock to prevent
+	 * it from changing.
+	 */
 	ASSERT(RW_LOCK_HELD(&dn->dn_struct_rwlock));
 	ASSERT(MUTEX_HELD(&db->db_mtx));
-	ASSERT(db->db_state == DB_UNCACHED);
+	ASSERT(db->db_state == DB_UNCACHED || db->db_state == DB_NOFILL);
 	ASSERT(db->db_buf == NULL);
 
 	if (db->db_blkid == DMU_BONUS_BLKID) {
@@ -1045,34 +1049,30 @@ dbuf_read_impl(dmu_buf_impl_t *db, zio_t *zio, uint32_t flags)
 	 * processes the delete record and clears the bp while we are waiting
 	 * for the dn_mtx (resulting in a "no" from block_freed).
 	 */
-	if (db->db_blkptr == NULL || BP_IS_HOLE(db->db_blkptr) ||
+	if (bp == NULL || BP_IS_HOLE(bp) ||
 	    (db->db_level == 0 && (dnode_block_freed(dn, db->db_blkid) ||
-	    BP_IS_HOLE(db->db_blkptr)))) {
+	    BP_IS_HOLE(bp)))) {
 		arc_buf_contents_t type = DBUF_GET_BUFC_TYPE(db);
 
 		dbuf_set_data(db, arc_alloc_buf(db->db_objset->os_spa, db, type,
 		    db->db.db_size));
 		bzero(db->db.db_data, db->db.db_size);
 
-		if (db->db_blkptr != NULL && db->db_level > 0 &&
-		    BP_IS_HOLE(db->db_blkptr) &&
-		    db->db_blkptr->blk_birth != 0) {
+		if (bp != NULL && db->db_level > 0 &&
+		    BP_IS_HOLE(bp) && bp->blk_birth != 0) {
 			blkptr_t *bps = db->db.db_data;
 			int i;
 			for (i = 0; i < ((1 <<
 			    DB_DNODE(db)->dn_indblkshift) / sizeof (blkptr_t));
 			    i++) {
 				blkptr_t *bp = &bps[i];
-				ASSERT3U(BP_GET_LSIZE(db->db_blkptr), ==,
+				ASSERT3U(BP_GET_LSIZE(bp), ==,
 				    1 << dn->dn_indblkshift);
-				BP_SET_LSIZE(bp,
-				    BP_GET_LEVEL(db->db_blkptr) == 1 ?
-				    dn->dn_datablksz :
-				    BP_GET_LSIZE(db->db_blkptr));
-				BP_SET_TYPE(bp, BP_GET_TYPE(db->db_blkptr));
-				BP_SET_LEVEL(bp,
-				    BP_GET_LEVEL(db->db_blkptr) - 1);
-				BP_SET_BIRTH(bp, db->db_blkptr->blk_birth, 0);
+				BP_SET_LSIZE(bp, BP_GET_LEVEL(bp) == 1 ?
+				    dn->dn_datablksz : BP_GET_LSIZE(bp));
+				BP_SET_TYPE(bp, BP_GET_TYPE(bp));
+				BP_SET_LEVEL(bp, BP_GET_LEVEL(bp) - 1);
+				BP_SET_BIRTH(bp, bp->blk_birth, 0);
 			}
 		}
 		DB_DNODE_EXIT(db);
@@ -1095,7 +1095,7 @@ dbuf_read_impl(dmu_buf_impl_t *db, zio_t *zio, uint32_t flags)
 
 	dbuf_add_ref(db, NULL);
 
-	err = arc_read(zio, db->db_objset->os_spa, db->db_blkptr,
+	err = arc_read(zio, db->db_objset->os_spa, bp,
 	    dbuf_read_done, db, ZIO_PRIORITY_SYNC_READ,
 	    (flags & DB_RF_CANFAIL) ? ZIO_FLAG_CANFAIL : ZIO_FLAG_MUSTSUCCEED,
 	    &aflags, &zb);
@@ -1180,9 +1180,6 @@ dbuf_read(dmu_buf_impl_t *db, zio_t *zio, uint32_t flags)
 	 */
 	ASSERT(!refcount_is_zero(&db->db_holds));
 
-	if (db->db_state == DB_NOFILL)
-		return (SET_ERROR(EIO));
-
 	DB_DNODE_ENTER(db);
 	dn = DB_DNODE(db);
 	if ((flags & DB_RF_HAVESTRUCT) == 0)
@@ -1193,7 +1190,56 @@ dbuf_read(dmu_buf_impl_t *db, zio_t *zio, uint32_t flags)
 	    DBUF_IS_CACHEABLE(db);
 
 	mutex_enter(&db->db_mtx);
-	if (db->db_state == DB_CACHED) {
+	if (db->db_state == DB_NOFILL) {
+		ASSERT3U(db->db_level, ==, 0);
+		if (db->db_last_dirty != NULL &&
+		    db->db_last_dirty->dt.dl.dr_override_state ==
+		    DR_OVERRIDDEN) {
+			/*
+			 * This is a directio write that hasn't been synced yet.
+			 * Read it back from where we just wrote it :-(
+			 */
+
+			ASSERT3P(db->db_last_dirty->dr_next, ==, NULL);
+
+                        if (zio == NULL) {
+                                zio = zio_root(dn->dn_objset->os_spa,
+                                    NULL, NULL, ZIO_FLAG_CANFAIL);
+                        }
+
+                        err = dbuf_read_impl(db,
+                            &db->db_last_dirty->dt.dl.dr_overridden_by,
+                            zio, flags);
+
+                        db->db_last_dirty->dt.dl.dr_data = db->db_buf;
+
+                        /*
+                         * Now the dbuf should be in the same state as if
+                         * we did a dmu_sync() from the ZIL, rather than
+                         * from directio.
+                         */
+
+                        /* dbuf_read_impl has dropped db_mtx for us */
+
+                        /*
+                        if (prefetch)
+                                dmu_zfetch(&dn->dn_zfetch, db->db_blkid, 1, B_TRUE);
+                        */
+
+                        if ((flags & DB_RF_HAVESTRUCT) == 0)
+                                rw_exit(&dn->dn_struct_rwlock);
+                        DB_DNODE_EXIT(db);
+
+                        if (!err && !havepzio)
+                                err = zio_wait(zio);
+		} else {
+			err = SET_ERROR(EIO);
+			mutex_exit(&db->db_mtx);
+			DB_DNODE_EXIT(db);
+			if ((flags & DB_RF_HAVESTRUCT) == 0)
+				rw_exit(&dn->dn_struct_rwlock);
+		}
+	} else if (db->db_state == DB_CACHED) {
 		/*
 		 * If the arc buf is compressed, we need to decompress it to
 		 * read the data. This could happen during the "zfs receive" of
@@ -1219,7 +1265,7 @@ dbuf_read(dmu_buf_impl_t *db, zio_t *zio, uint32_t flags)
 		    db->db_blkptr != NULL && !BP_IS_HOLE(db->db_blkptr))
 			zio = zio_root(spa, NULL, NULL, ZIO_FLAG_CANFAIL);
 
-		err = dbuf_read_impl(db, zio, flags);
+		err = dbuf_read_impl(db, db->db_blkptr, zio, flags);
 
 		/* dbuf_read_impl has dropped db_mtx for us */
 

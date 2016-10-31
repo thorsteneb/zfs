@@ -58,6 +58,10 @@
  * Enable/disable nopwrite feature.
  */
 int zfs_nopwrite_enabled = 1;
+boolean_t zfs_directio = B_TRUE;
+
+
+static int dbuf_sync_override(dmu_buf_impl_t *db, dmu_tx_t *tx);
 
 /*
  * Tunable to control percentage of dirtied blocks from frees in one TXG.
@@ -1486,6 +1490,9 @@ dmu_assign_arcbuf(dmu_buf_t *handle, uint64_t offset, arc_buf_t *buf,
 	 */
 	if (offset == db->db.db_offset && blksz == db->db.db_size) {
 		dbuf_assign_arcbuf(db, buf, tx);
+		if (zfs_directio) {
+			dbuf_sync_override(db, tx);
+		}
 		dbuf_rele(db, FTAG);
 	} else {
 		objset_t *os;
@@ -1806,6 +1813,63 @@ dmu_sync(zio_t *pio, uint64_t txg, dmu_sync_cb_t *done, zgd_t *zgd)
 	    ZIO_PRIORITY_SYNC_WRITE, ZIO_FLAG_CANFAIL, &zb));
 
 	return (0);
+}
+
+static void dbuf_sync_override_done(zgd_t *arg, int error)
+{
+	/* nothing */
+}
+
+/*
+ * From open context, write this dirty dbuf to disk and evict its data from
+ * memory.  Blocks until this is complete.  Note that the contents are not
+ * logically persistent until the txg is synced out, at which point we will
+ * persist the block pointer to the data that was already written.
+ */
+static int
+dbuf_sync_override(dmu_buf_impl_t *db, dmu_tx_t *tx)
+{
+	spa_t *spa = dmu_objset_spa(db->db_objset);
+	zio_t *zio = zio_root(spa, NULL, NULL, 0);
+	blkptr_t bp = { 0 };
+
+	zgd_t *zgd = kmem_zalloc(sizeof (*zgd), KM_SLEEP);
+	zgd->zgd_bp = &bp;
+	zgd->zgd_db = &db->db;
+	/*
+	 * note: the remaining fields in zgd_t are only for use by the
+	 * donefunc.  Really there is no reason for dmu_sync() to be tied
+	 * to the ZIL (via zil_get_data_t).
+	 */
+
+	/* if successful, dmu_sync() will set dr_overridden_by */
+	int error = dmu_sync(zio, dmu_tx_get_txg(tx),
+	    dbuf_sync_override_done, zgd);
+
+	/*
+	 * The other failure modes of dmu_sync() can't happen while we are
+	 * holding the tx open, with the range lock held.
+	 */
+	ASSERT(error == 0 || error == EIO);
+
+	error = zio_wait(zio);
+	kmem_free(zgd, sizeof (*zgd));
+
+	/*
+	 * Free dbuf's data.
+	 */
+	arc_release(db->db_buf, db);
+	ASSERT(arc_released(db->db_buf));
+	mutex_enter(&db->db_mtx);
+	arc_buf_destroy(db->db_buf, db);
+	db->db_state = DB_NOFILL;
+	struct dirty_leaf *dl = &db->db_last_dirty->dt.dl;
+	dl->dr_data = NULL;
+	db->db_buf = NULL;
+	db->db.db_data = NULL;
+	mutex_exit(&db->db_mtx);
+
+	return (error);
 }
 
 int
