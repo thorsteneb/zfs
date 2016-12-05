@@ -893,6 +893,18 @@ dbuf_set_data(dmu_buf_impl_t *db, arc_buf_t *buf)
 	db->db_buf = buf;
 	ASSERT(buf->b_data != NULL);
 	db->db.db_data = buf->b_data;
+
+	/*
+	 * If there is a directio, set its data too.  Then its state should be
+	 * the same as if we did a ZIL dmu_sync().
+	 */
+	if (db->db_last_dirty != NULL && db->db_level == 0 &&
+	    db->db_last_dirty->dt.dl.dr_override_state == DR_OVERRIDDEN &&
+	    db->db_last_dirty->dt.dl.dr_data == NULL) {
+		db->db_last_dirty->dt.dl.dr_data = db->db_buf;
+		zfs_dbgmsg("completed read for directio write of %p, setting dr_data to %p",
+		    db, db->db_buf);
+	}
 }
 
 /*
@@ -1020,7 +1032,7 @@ dbuf_read_impl(dmu_buf_impl_t *db, const blkptr_t *bp,
 	 */
 	ASSERT(RW_LOCK_HELD(&dn->dn_struct_rwlock));
 	ASSERT(MUTEX_HELD(&db->db_mtx));
-	ASSERT(db->db_state == DB_UNCACHED || db->db_state == DB_NOFILL);
+	ASSERT(db->db_state == DB_UNCACHED);
 	ASSERT(db->db_buf == NULL);
 
 	if (db->db_blkid == DMU_BONUS_BLKID) {
@@ -1065,14 +1077,14 @@ dbuf_read_impl(dmu_buf_impl_t *db, const blkptr_t *bp,
 			for (i = 0; i < ((1 <<
 			    DB_DNODE(db)->dn_indblkshift) / sizeof (blkptr_t));
 			    i++) {
-				blkptr_t *bp = &bps[i];
+				blkptr_t *thisbp = &bps[i];
 				ASSERT3U(BP_GET_LSIZE(bp), ==,
 				    1 << dn->dn_indblkshift);
-				BP_SET_LSIZE(bp, BP_GET_LEVEL(bp) == 1 ?
+				BP_SET_LSIZE(thisbp, BP_GET_LEVEL(bp) == 1 ?
 				    dn->dn_datablksz : BP_GET_LSIZE(bp));
-				BP_SET_TYPE(bp, BP_GET_TYPE(bp));
-				BP_SET_LEVEL(bp, BP_GET_LEVEL(bp) - 1);
-				BP_SET_BIRTH(bp, bp->blk_birth, 0);
+				BP_SET_TYPE(thisbp, BP_GET_TYPE(bp));
+				BP_SET_LEVEL(thisbp, BP_GET_LEVEL(bp) - 1);
+				BP_SET_BIRTH(thisbp, bp->blk_birth, 0);
 			}
 		}
 		DB_DNODE_EXIT(db);
@@ -1180,6 +1192,9 @@ dbuf_read(dmu_buf_impl_t *db, zio_t *zio, uint32_t flags)
 	 */
 	ASSERT(!refcount_is_zero(&db->db_holds));
 
+	if (db->db_state == DB_NOFILL)
+		return (SET_ERROR(EIO));
+
 	DB_DNODE_ENTER(db);
 	dn = DB_DNODE(db);
 	if ((flags & DB_RF_HAVESTRUCT) == 0)
@@ -1190,55 +1205,44 @@ dbuf_read(dmu_buf_impl_t *db, zio_t *zio, uint32_t flags)
 	    DBUF_IS_CACHEABLE(db);
 
 	mutex_enter(&db->db_mtx);
-	if (db->db_state == DB_NOFILL) {
-		ASSERT3U(db->db_level, ==, 0);
-		if (db->db_last_dirty != NULL &&
-		    db->db_last_dirty->dt.dl.dr_override_state ==
-		    DR_OVERRIDDEN) {
-			/*
-			 * This is a directio write that hasn't been synced yet.
-			 * Read it back from where we just wrote it :-(
-			 */
+	if (db->db_state == DB_UNCACHED && db->db_last_dirty != NULL &&
+	    db->db_last_dirty->dt.dl.dr_override_state == DR_OVERRIDDEN) {
+                /*
+                 * This is a directio write that hasn't been synced yet.
+                 * Read it back from where we just wrote it :-(
+                 */
 
-			ASSERT3P(db->db_last_dirty->dr_next, ==, NULL);
+                if (zio == NULL) {
+                        zio = zio_root(dn->dn_objset->os_spa,
+                            NULL, NULL, ZIO_FLAG_CANFAIL);
+                }
 
-                        if (zio == NULL) {
-                                zio = zio_root(dn->dn_objset->os_spa,
-                                    NULL, NULL, ZIO_FLAG_CANFAIL);
-                        }
+                zfs_dbgmsg("dbuf_read(%p) of directio write for txg %llx",
+                    db, db->db_last_dirty->dr_txg);
 
-                        err = dbuf_read_impl(db,
-                            &db->db_last_dirty->dt.dl.dr_overridden_by,
-                            zio, flags);
+                err = dbuf_read_impl(db,
+                    &db->db_last_dirty->dt.dl.dr_overridden_by,
+                    zio, flags);
 
-                        db->db_last_dirty->dt.dl.dr_data = db->db_buf;
+                /*
+                 * After the read completes, the dbuf should be in the
+                 * same state as if we did a dmu_sync() from the ZIL,
+                 * rather than from directio.
+                 */
 
-                        /*
-                         * Now the dbuf should be in the same state as if
-                         * we did a dmu_sync() from the ZIL, rather than
-                         * from directio.
-                         */
+                /* dbuf_read_impl has dropped db_mtx for us */
 
-                        /* dbuf_read_impl has dropped db_mtx for us */
+                /*
+                if (prefetch)
+                        dmu_zfetch(&dn->dn_zfetch, db->db_blkid, 1, B_TRUE);
+                */
 
-                        /*
-                        if (prefetch)
-                                dmu_zfetch(&dn->dn_zfetch, db->db_blkid, 1, B_TRUE);
-                        */
+                if ((flags & DB_RF_HAVESTRUCT) == 0)
+                        rw_exit(&dn->dn_struct_rwlock);
+                DB_DNODE_EXIT(db);
 
-                        if ((flags & DB_RF_HAVESTRUCT) == 0)
-                                rw_exit(&dn->dn_struct_rwlock);
-                        DB_DNODE_EXIT(db);
-
-                        if (!err && !havepzio)
-                                err = zio_wait(zio);
-		} else {
-			err = SET_ERROR(EIO);
-			mutex_exit(&db->db_mtx);
-			DB_DNODE_EXIT(db);
-			if ((flags & DB_RF_HAVESTRUCT) == 0)
-				rw_exit(&dn->dn_struct_rwlock);
-		}
+                if (!err && !havepzio)
+                        err = zio_wait(zio);
 	} else if (db->db_state == DB_CACHED) {
 		/*
 		 * If the arc buf is compressed, we need to decompress it to
@@ -1323,7 +1327,7 @@ dbuf_noread(dmu_buf_impl_t *db)
 	mutex_enter(&db->db_mtx);
 	while (db->db_state == DB_READ || db->db_state == DB_FILL)
 		cv_wait(&db->db_changed, &db->db_mtx);
-	if (db->db_state == DB_UNCACHED) {
+	if (db->db_state == DB_UNCACHED || db->db_state == DB_NOFILL) {
 		arc_buf_contents_t type = DBUF_GET_BUFC_TYPE(db);
 		spa_t *spa = db->db_objset->os_spa;
 
@@ -1332,6 +1336,9 @@ dbuf_noread(dmu_buf_impl_t *db)
 		dbuf_set_data(db, arc_alloc_buf(spa, db, type, db->db.db_size));
 		db->db_state = DB_FILL;
 	} else if (db->db_state == DB_NOFILL) {
+		/* XXX this is good in the dumpify case, but we want to treat
+		 * directio similar to DB_UNCACHED.
+		 */
 		dbuf_clear_data(db);
 	} else {
 		ASSERT3U(db->db_state, ==, DB_CACHED);
@@ -1370,8 +1377,12 @@ dbuf_unoverride(dbuf_dirty_record_t *dr)
 	 * another (redundant) arc_release().  Therefore, leave
 	 * the buf thawed to save the effort of freezing &
 	 * immediately re-thawing it.
+	 *
+	 * dr_data may be NULL if this is a directio override.
 	 */
-	arc_release(dr->dt.dl.dr_data, db);
+	zfs_dbgmsg("dbuf_unoverride(%p) dr_data=%p", db, dr->dt.dl.dr_data);
+	if (dr->dt.dl.dr_data != NULL)
+		arc_release(dr->dt.dl.dr_data, db);
 }
 
 /*
@@ -1980,8 +1991,6 @@ dbuf_undirty(dmu_buf_impl_t *db, dmu_tx_t *tx)
 	if (db->db_state != DB_NOFILL) {
 		dbuf_unoverride(dr);
 
-		ASSERT(db->db_buf != NULL);
-		ASSERT(dr->dt.dl.dr_data != NULL);
 		if (dr->dt.dl.dr_data != db->db_buf)
 			arc_buf_destroy(dr->dt.dl.dr_data, db);
 	}
@@ -1992,7 +2001,8 @@ dbuf_undirty(dmu_buf_impl_t *db, dmu_tx_t *tx)
 	db->db_dirtycnt -= 1;
 
 	if (refcount_remove(&db->db_holds, (void *)(uintptr_t)txg) == 0) {
-		ASSERT(db->db_state == DB_NOFILL || arc_released(db->db_buf));
+		ASSERT(db->db_state == DB_NOFILL ||
+		    db->db_state == DB_UNCACHED || arc_released(db->db_buf));
 		dbuf_destroy(db);
 		return (B_TRUE);
 	}
@@ -3300,13 +3310,14 @@ dbuf_sync_leaf(dbuf_dirty_record_t *dr, dmu_tx_t *tx)
 	 * might have been freed after the dirty.
 	 */
 	if (db->db_state == DB_UNCACHED) {
-		/* This buffer has been freed since it was dirtied */
+		/* This buffer has been freed or directio'd since it was dirtied */
 		ASSERT(db->db.db_data == NULL);
 	} else if (db->db_state == DB_FILL) {
 		/* This buffer was freed and is now being re-filled */
 		ASSERT(db->db.db_data != dr->dt.dl.dr_data);
 	} else {
-		ASSERT(db->db_state == DB_CACHED || db->db_state == DB_NOFILL);
+		ASSERT(db->db_state == DB_CACHED || db->db_state == DB_NOFILL ||
+		    db->db_state == DB_READ);
 	}
 	DBUF_VERIFY(db);
 
@@ -3698,8 +3709,10 @@ dbuf_write_done(zio_t *zio, arc_buf_t *buf, void *vdb)
 		ASSERT(db->db_blkid != DMU_BONUS_BLKID);
 		ASSERT(dr->dt.dl.dr_override_state == DR_NOT_OVERRIDDEN);
 		if (db->db_state != DB_NOFILL) {
-			if (dr->dt.dl.dr_data != db->db_buf)
+			if (dr->dt.dl.dr_data != NULL &&
+			    dr->dt.dl.dr_data != db->db_buf) {
 				arc_buf_destroy(dr->dt.dl.dr_data, db);
+			}
 		}
 	} else {
 		dnode_t *dn;
@@ -3761,7 +3774,8 @@ dbuf_write_override_done(zio_t *zio)
 	if (!BP_EQUAL(zio->io_bp, obp)) {
 		if (!BP_IS_HOLE(obp))
 			dsl_free(spa_get_dsl(zio->io_spa), zio->io_txg, obp);
-		arc_release(dr->dt.dl.dr_data, db);
+		if (dr->dt.dl.dr_data != NULL)
+                        arc_release(dr->dt.dl.dr_data, db);
 	}
 	mutex_exit(&db->db_mtx);
 

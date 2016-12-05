@@ -1491,7 +1491,7 @@ dmu_assign_arcbuf(dmu_buf_t *handle, uint64_t offset, arc_buf_t *buf,
 	if (offset == db->db.db_offset && blksz == db->db.db_size) {
 		dbuf_assign_arcbuf(db, buf, tx);
 		if (zfs_directio) {
-			dbuf_sync_override(db, tx);
+			(void) dbuf_sync_override(db, tx);
 		}
 		dbuf_rele(db, FTAG);
 	} else {
@@ -1575,6 +1575,7 @@ dmu_sync_done(zio_t *zio, arc_buf_t *buf, void *varg)
 		dr->dt.dl.dr_overridden_by = *zio->io_bp;
 		dr->dt.dl.dr_override_state = DR_OVERRIDDEN;
 		dr->dt.dl.dr_copies = zio->io_prop.zp_copies;
+		zfs_dbgmsg("dmu_sync_done(%p): overriding", db);
 
 		/*
 		 * Old style holes are filled with all zeros, whereas
@@ -1815,8 +1816,10 @@ dmu_sync(zio_t *pio, uint64_t txg, dmu_sync_cb_t *done, zgd_t *zgd)
 	return (0);
 }
 
+/* ARGSUSED */
 static void dbuf_sync_override_done(zgd_t *arg, int error)
 {
+	ASSERT0(error);
 	/* nothing */
 }
 
@@ -1842,6 +1845,16 @@ dbuf_sync_override(dmu_buf_impl_t *db, dmu_tx_t *tx)
 	 * to the ZIL (via zil_get_data_t).
 	 */
 
+	/*
+	 * If the pool is frozen, dmu_sync() will treat this like a
+	 * "late arrival" (as though this txg were currently syncing).
+	 * This won't work right, because it tries to assing a new tx,
+	 * but we already have one open.  It also doesn't set the
+	 * dr_override_state, which we rely on.
+	 */
+	if (spa_freeze_txg(spa) > 0)
+		return (ENOTSUP);
+
 	/* if successful, dmu_sync() will set dr_overridden_by */
 	int error = dmu_sync(zio, dmu_tx_get_txg(tx),
 	    dbuf_sync_override_done, zgd);
@@ -1853,7 +1866,11 @@ dbuf_sync_override(dmu_buf_impl_t *db, dmu_tx_t *tx)
 	ASSERT(error == 0 || error == EIO);
 
 	error = zio_wait(zio);
+	ASSERT0(error);
+	ASSERT3U(db->db_last_dirty->dt.dl.dr_override_state, ==, DR_OVERRIDDEN);
 	kmem_free(zgd, sizeof (*zgd));
+
+	zfs_dbgmsg("dbuf_sync_override(%p, %llx)", db, dmu_tx_get_txg(tx));
 
 	/*
 	 * Free dbuf's data.
@@ -1862,7 +1879,7 @@ dbuf_sync_override(dmu_buf_impl_t *db, dmu_tx_t *tx)
 	ASSERT(arc_released(db->db_buf));
 	mutex_enter(&db->db_mtx);
 	arc_buf_destroy(db->db_buf, db);
-	db->db_state = DB_NOFILL;
+	db->db_state = DB_UNCACHED;
 	struct dirty_leaf *dl = &db->db_last_dirty->dt.dl;
 	dl->dr_data = NULL;
 	db->db_buf = NULL;
