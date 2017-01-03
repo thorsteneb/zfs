@@ -945,7 +945,8 @@ typedef struct zgd {
 } zgd_t;
 
 typedef void dmu_sync_cb_t(zgd_t *arg, int error);
-int dmu_sync(struct zio *zio, uint64_t txg, dmu_sync_cb_t *done, zgd_t *zgd);
+int dmu_sync(struct zio *pio, uint64_t txg, boolean_t cacheable,
+    dmu_sync_cb_t *done, zgd_t *zgd);
 
 /*
  * Find the next hole or data block in file starting at *off

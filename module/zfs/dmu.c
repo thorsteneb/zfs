@@ -20,7 +20,7 @@
  */
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
- * Copyright (c) 2011, 2016 by Delphix. All rights reserved.
+ * Copyright (c) 2011, 2017 by Delphix. All rights reserved.
  * Copyright (c) 2013 by Saso Kiselkov. All rights reserved.
  * Copyright (c) 2013, Joyent, Inc. All rights reserved.
  * Copyright (c) 2016, Nexenta Systems, Inc. All rights reserved.
@@ -1667,6 +1667,9 @@ dmu_sync_late_arrival(zio_t *pio, objset_t *os, dmu_sync_cb_t *done, zgd_t *zgd,
  * N.B. and XXX: the caller is responsible for making sure that the
  * data isn't changing while dmu_sync() is writing it.
  *
+ * If the cacheable argument is false, the arc_buf will remain anonymous
+ * (i.e. released).
+ *
  * Return values:
  *
  *	EEXIST: this txg has already been synced, so there's nothing to do.
@@ -1688,7 +1691,8 @@ dmu_sync_late_arrival(zio_t *pio, objset_t *os, dmu_sync_cb_t *done, zgd_t *zgd,
  *		propagated to pio from zio_done().
  */
 int
-dmu_sync(zio_t *pio, uint64_t txg, dmu_sync_cb_t *done, zgd_t *zgd)
+dmu_sync(zio_t *pio, uint64_t txg, boolean_t cacheable,
+    dmu_sync_cb_t *done, zgd_t *zgd)
 {
 	blkptr_t *bp = zgd->zgd_bp;
 	dmu_buf_impl_t *db = (dmu_buf_impl_t *)zgd->zgd_db;
@@ -1756,6 +1760,15 @@ dmu_sync(zio_t *pio, uint64_t txg, dmu_sync_cb_t *done, zgd_t *zgd)
 		return (SET_ERROR(ENOENT));
 	}
 
+	/*
+	 * recompute the write policy so that we override the compression,
+	 * in case this is a compressed buf.
+	 */
+	arc_buf_t *buf = dr->dt.dl.dr_data;
+	dmu_write_policy(os, dn, db->db_level, WP_DMU_SYNC,
+	    (buf != NULL && arc_get_compression(buf) != ZIO_COMPRESS_OFF) ?
+	    arc_get_compression(buf) : ZIO_COMPRESS_INHERIT, &zp);
+
 	ASSERT(dr->dr_next == NULL || dr->dr_next->dr_txg < txg);
 
 	/*
@@ -1809,7 +1822,7 @@ dmu_sync(zio_t *pio, uint64_t txg, dmu_sync_cb_t *done, zgd_t *zgd)
 	dsa->dsa_tx = NULL;
 
 	zio_nowait(arc_write(pio, os->os_spa, txg,
-	    bp, dr->dt.dl.dr_data, DBUF_IS_L2CACHEABLE(db),
+	    bp, dr->dt.dl.dr_data, DBUF_IS_L2CACHEABLE(db), cacheable,
 	    &zp, dmu_sync_ready, NULL, NULL, dmu_sync_done, dsa,
 	    ZIO_PRIORITY_SYNC_WRITE, ZIO_FLAG_CANFAIL, &zb));
 
@@ -1819,6 +1832,7 @@ dmu_sync(zio_t *pio, uint64_t txg, dmu_sync_cb_t *done, zgd_t *zgd)
 /* ARGSUSED */
 static void dbuf_sync_override_done(zgd_t *arg, int error)
 {
+	/* XXX need to ignore ENXIO, at least, for ztest error injection */
 	ASSERT0(error);
 	/* nothing */
 }
@@ -1852,11 +1866,11 @@ dbuf_sync_override(dmu_buf_impl_t *db, dmu_tx_t *tx)
 	 * but we already have one open.  It also doesn't set the
 	 * dr_override_state, which we rely on.
 	 */
-	if (spa_freeze_txg(spa) > 0)
-		return (ENOTSUP);
+	if (spa_freeze_txg(spa) != UINT64_MAX)
+		return (SET_ERROR(ENOTSUP));
 
 	/* if successful, dmu_sync() will set dr_overridden_by */
-	int error = dmu_sync(zio, dmu_tx_get_txg(tx),
+	int error = dmu_sync(zio, dmu_tx_get_txg(tx), B_FALSE,
 	    dbuf_sync_override_done, zgd);
 
 	/*
@@ -1866,6 +1880,7 @@ dbuf_sync_override(dmu_buf_impl_t *db, dmu_tx_t *tx)
 	ASSERT(error == 0 || error == EIO);
 
 	error = zio_wait(zio);
+	/* XXX need to handle ENXIO, at least, for ztest error injection */
 	ASSERT0(error);
 	ASSERT3U(db->db_last_dirty->dt.dl.dr_override_state, ==, DR_OVERRIDDEN);
 	kmem_free(zgd, sizeof (*zgd));
@@ -1875,7 +1890,7 @@ dbuf_sync_override(dmu_buf_impl_t *db, dmu_tx_t *tx)
 	/*
 	 * Free dbuf's data.
 	 */
-	arc_release(db->db_buf, db);
+	/* arc_release(db->db_buf, db); */
 	ASSERT(arc_released(db->db_buf));
 	mutex_enter(&db->db_mtx);
 	arc_buf_destroy(db->db_buf, db);

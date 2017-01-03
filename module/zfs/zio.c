@@ -1239,6 +1239,11 @@ zio_write_bp_init(zio_t *zio)
 		ASSERT((zio_checksum_table[zp->zp_checksum].ci_flags &
 		    ZCHECKSUM_FLAG_DEDUP) || zp->zp_dedup_verify);
 
+		zp->zp_checksum = BP_GET_CHECKSUM(bp);
+		BP_SET_DEDUP(bp, 1);
+		zio->io_pipeline |= ZIO_STAGE_DDT_WRITE;
+		return (ZIO_PIPELINE_CONTINUE);
+#if 0
 		if (BP_GET_CHECKSUM(bp) == zp->zp_checksum) {
 			BP_SET_DEDUP(bp, 1);
 			zio->io_pipeline |= ZIO_STAGE_DDT_WRITE;
@@ -1252,6 +1257,7 @@ zio_write_bp_init(zio_t *zio)
 		zio->io_bp_override = NULL;
 		*bp = zio->io_bp_orig;
 		zio->io_pipeline = zio->io_orig_pipeline;
+#endif
 	}
 
 	return (ZIO_PIPELINE_CONTINUE);

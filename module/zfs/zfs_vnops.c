@@ -1085,7 +1085,7 @@ zfs_get_data(void *arg, lr_write_t *lr, char *buf, zio_t *zio)
 			ASSERT(db->db_offset == offset);
 			ASSERT(db->db_size == size);
 
-			error = dmu_sync(zio, lr->lr_common.lrc_txg,
+			error = dmu_sync(zio, lr->lr_common.lrc_txg, B_TRUE,
 			    zfs_get_done, zgd);
 			ASSERT(error || lr->lr_length <= size);
 

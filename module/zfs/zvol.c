@@ -923,7 +923,7 @@ zvol_get_data(void *arg, lr_write_t *lr, char *buf, zio_t *zio)
 			ASSERT(db->db_size == size);
 
 			error = dmu_sync(zio, lr->lr_common.lrc_txg,
-			    zvol_get_done, zgd);
+			    B_TRUE, zvol_get_done, zgd);
 
 			if (error == 0)
 				return (0);

@@ -106,6 +106,7 @@ struct arc_write_callback {
 	arc_done_func_t	*awcb_physdone;
 	arc_done_func_t	*awcb_done;
 	arc_buf_t	*awcb_buf;
+	boolean_t	awcb_cacheable;
 };
 
 /*
