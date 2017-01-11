@@ -371,7 +371,9 @@ update_pages(struct inode *ip, int64_t start, int len,
  *		else we default from the dmu buffer.
  *
  * NOTE: We will always "break up" the IO into PAGESIZE uiomoves when
- *	 the file is memory mapped.
+ *	 the file is memory mapped.  Therefore we don't support directio
+ *	 on mapped files, because if we are reading PAGESIZE chunks from a
+ *	 larger block, we would read the block multiple times.
  */
 static int
 mappedread(struct inode *ip, int nbytes, uio_t *uio)
@@ -406,7 +408,7 @@ mappedread(struct inode *ip, int nbytes, uio_t *uio)
 			put_page(pp);
 		} else {
 			error = dmu_read_uio_dbuf(sa_get_db(zp->z_sa_hdl),
-			    uio, bytes);
+			    uio, bytes, B_FALSE);
 		}
 
 		len -= bytes;
@@ -538,7 +540,7 @@ zfs_read(struct inode *ip, uio_t *uio, int ioflag, cred_t *cr)
 			error = mappedread(ip, nbytes, uio);
 		} else {
 			error = dmu_read_uio_dbuf(sa_get_db(zp->z_sa_hdl),
-			    uio, nbytes);
+			    uio, nbytes, zp->z_directio);
 		}
 
 		if (error) {
@@ -835,7 +837,7 @@ zfs_write(struct inode *ip, uio_t *uio, int ioflag, cred_t *cr)
 			} else {
 				ASSERT(xuio || tx_bytes == max_blksz);
 				dmu_assign_arcbuf(sa_get_db(zp->z_sa_hdl),
-				    woff, abuf, tx);
+				    woff, zp->z_directio, abuf, tx);
 			}
 			ASSERT(tx_bytes <= uio->uio_resid);
 			uioskip(uio, tx_bytes);

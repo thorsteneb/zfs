@@ -895,7 +895,7 @@ dbuf_set_data(dmu_buf_impl_t *db, arc_buf_t *buf)
 	db->db.db_data = buf->b_data;
 
 	/*
-	 * If there is a directio, set its data too.  Then its state should be
+	 * If there is a directio, set its data too.  Then its state will be
 	 * the same as if we did a ZIL dmu_sync().
 	 */
 	if (db->db_last_dirty != NULL && db->db_level == 0 &&
@@ -1107,6 +1107,9 @@ dbuf_read_impl(dmu_buf_impl_t *db, const blkptr_t *bp,
 
 	dbuf_add_ref(db, NULL);
 
+	if (db->db_nocache)
+		aflags |= ARC_FLAG_FORCE_LINEAR;
+
 	err = arc_read(zio, db->db_objset->os_spa, bp,
 	    dbuf_read_done, db, ZIO_PRIORITY_SYNC_READ,
 	    (flags & DB_RF_CANFAIL) ? ZIO_FLAG_CANFAIL : ZIO_FLAG_MUSTSUCCEED,
@@ -1210,6 +1213,9 @@ dbuf_read(dmu_buf_impl_t *db, zio_t *zio, uint32_t flags)
                 /*
                  * This is a directio write that hasn't been synced yet.
                  * Read it back from where we just wrote it :-(
+                 * After the read completes, the dbuf is in the same state as
+                 * if we did a dmu_sync() from the ZIL, rather than from
+                 * directio.
                  */
 
                 if (zio == NULL) {
@@ -1223,19 +1229,7 @@ dbuf_read(dmu_buf_impl_t *db, zio_t *zio, uint32_t flags)
                 err = dbuf_read_impl(db,
                     &db->db_last_dirty->dt.dl.dr_overridden_by,
                     zio, flags);
-
-                /*
-                 * After the read completes, the dbuf should be in the
-                 * same state as if we did a dmu_sync() from the ZIL,
-                 * rather than from directio.
-                 */
-
                 /* dbuf_read_impl has dropped db_mtx for us */
-
-                /*
-                if (prefetch)
-                        dmu_zfetch(&dn->dn_zfetch, db->db_blkid, 1, B_TRUE);
-                */
 
                 if ((flags & DB_RF_HAVESTRUCT) == 0)
                         rw_exit(&dn->dn_struct_rwlock);
@@ -1327,7 +1321,7 @@ dbuf_noread(dmu_buf_impl_t *db)
 	mutex_enter(&db->db_mtx);
 	while (db->db_state == DB_READ || db->db_state == DB_FILL)
 		cv_wait(&db->db_changed, &db->db_mtx);
-	if (db->db_state == DB_UNCACHED || db->db_state == DB_NOFILL) {
+	if (db->db_state == DB_UNCACHED) {
 		arc_buf_contents_t type = DBUF_GET_BUFC_TYPE(db);
 		spa_t *spa = db->db_objset->os_spa;
 
@@ -1336,9 +1330,6 @@ dbuf_noread(dmu_buf_impl_t *db)
 		dbuf_set_data(db, arc_alloc_buf(spa, db, type, db->db.db_size));
 		db->db_state = DB_FILL;
 	} else if (db->db_state == DB_NOFILL) {
-		/* XXX this is good in the dumpify case, but we want to treat
-		 * directio similar to DB_UNCACHED.
-		 */
 		dbuf_clear_data(db);
 	} else {
 		ASSERT3U(db->db_state, ==, DB_CACHED);
@@ -2803,6 +2794,7 @@ __dbuf_hold_impl(struct dbuf_hold_impl_data *dh)
 		    dh->dh_db->db.db_size, dh->dh_db);
 	}
 	(void) refcount_add(&dh->dh_db->db_holds, dh->dh_tag);
+	dh->dh_db->db_nocache = B_FALSE;
 	DBUF_VERIFY(dh->dh_db);
 	mutex_exit(&dh->dh_db->db_mtx);
 
@@ -3856,9 +3848,7 @@ dbuf_write(dbuf_dirty_record_t *dr, arc_buf_t *data, dmu_tx_t *tx)
 		wp_flag = WP_SPILL;
 	wp_flag |= (db->db_state == DB_NOFILL) ? WP_NOFILL : 0;
 
-	dmu_write_policy(os, dn, db->db_level, wp_flag,
-	    (data != NULL && arc_get_compression(data) != ZIO_COMPRESS_OFF) ?
-	    arc_get_compression(data) : ZIO_COMPRESS_INHERIT, &zp);
+	dmu_write_policy(os, dn, db->db_level, wp_flag, &zp);
 	DB_DNODE_EXIT(db);
 
 	/*

@@ -858,7 +858,8 @@ zio_write_override(zio_t *zio, blkptr_t *bp, int copies, boolean_t nopwrite)
 	 * when the bp was first written by dmu_sync() keeping in mind
 	 * that nopwrite and dedup are mutually exclusive.
 	 */
-	zio->io_prop.zp_dedup = nopwrite ? B_FALSE : zio->io_prop.zp_dedup;
+	if (nopwrite)
+		zio->io_prop.zp_dedup = B_FALSE;
 	zio->io_prop.zp_nopwrite = nopwrite;
 	zio->io_prop.zp_copies = copies;
 	zio->io_bp_override = bp;
@@ -2794,6 +2795,7 @@ zio_ddt_write(zio_t *zio)
 			zio->io_stage = ZIO_STAGE_OPEN;
 			BP_ZERO(bp);
 		} else {
+			zfs_dbgmsg("dedup verify with strong checksum failed zio=%p", zio);
 			zp->zp_dedup = B_FALSE;
 		}
 		zio->io_pipeline = ZIO_WRITE_PIPELINE;
@@ -2804,8 +2806,14 @@ zio_ddt_write(zio_t *zio)
 	ditto_copies = ddt_ditto_copies_needed(ddt, dde, ddp);
 	ASSERT(ditto_copies < SPA_DVAS_PER_BP);
 
+	/*
+	 * If we want more copies than there are, write another one.
+	 * However, we can't do this if we don't have the original data
+	 * (due to a directio write).
+	 */
 	if (ditto_copies > ddt_ditto_copies_present(dde) &&
-	    dde->dde_lead_zio[DDT_PHYS_DITTO] == NULL) {
+	    dde->dde_lead_zio[DDT_PHYS_DITTO] == NULL &&
+	    zio->io_abd != NULL) {
 		zio_prop_t czp = *zp;
 
 		czp.zp_copies = ditto_copies;

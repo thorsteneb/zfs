@@ -1461,7 +1461,6 @@ metaslab_init(metaslab_group_t *mg, uint64_t id, uint64_t object, uint64_t txg,
 	}
 
 	if (txg != 0) {
-		vdev_dirty(vd, 0, NULL, txg);
 		vdev_dirty(vd, VDD_METASLAB, ms, txg);
 	}
 
