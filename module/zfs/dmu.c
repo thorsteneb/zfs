@@ -1858,7 +1858,9 @@ dbuf_sync_override(dmu_buf_impl_t *db, dmu_tx_t *tx)
 {
 	spa_t *spa = dmu_objset_spa(db->db_objset);
 	zio_t *zio = zio_root(spa, NULL, NULL, 0);
-	blkptr_t bp = { 0 };
+	blkptr_t bp;
+
+	BP_ZERO(&bp);
 
 	zgd_t *zgd = kmem_zalloc(sizeof (*zgd), KM_SLEEP);
 	zgd->zgd_bp = &bp;
