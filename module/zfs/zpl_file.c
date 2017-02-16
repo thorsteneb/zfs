@@ -843,12 +843,20 @@ zpl_compat_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 }
 #endif /* CONFIG_COMPAT */
 
+static ssize_t
+zpl_direct_IO(int rw, struct kiocb *iocb, const struct iovec *iov,
+  loff_t offset, unsigned long nr_segs)
+{
+	panic("should never get here\n");
+	return 0;
+}
 
 const struct address_space_operations zpl_address_space_operations = {
 	.readpages	= zpl_readpages,
 	.readpage	= zpl_readpage,
 	.writepage	= zpl_writepage,
 	.writepages	= zpl_writepages,
+	.direct_IO	= zpl_direct_IO,
 };
 
 const struct file_operations zpl_file_operations = {

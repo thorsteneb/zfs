@@ -183,7 +183,6 @@ typedef struct znode {
 	uint8_t		z_atime_dirty;	/* atime needs to be synced */
 	uint8_t		z_zn_prefetch;	/* Prefetch znodes? */
 	uint8_t		z_moved;	/* Has this znode been moved? */
-	uint8_t		z_directio;	/* direct (uncached) i/o requested */
 	uint_t		z_blksz;	/* block size in bytes */
 	uint_t		z_seq;		/* modification sequence number */
 	uint64_t	z_mapcnt;	/* number of pages mapped to file */

@@ -536,11 +536,16 @@ zfs_read(struct inode *ip, uio_t *uio, int ioflag, cred_t *cr)
 		nbytes = MIN(n, zfs_read_chunk_size -
 		    P2PHASE(uio->uio_loffset, zfs_read_chunk_size));
 
+		/*
+		 * XXX making O_DIRECT bypass mappedread() means that it
+		 * will read the wrong data (at least, not the most
+		 * up-to-date data).
+		 */
 		if (zp->z_is_mapped && !(ioflag & O_DIRECT)) {
 			error = mappedread(ip, nbytes, uio);
 		} else {
 			error = dmu_read_uio_dbuf(sa_get_db(zp->z_sa_hdl),
-			    uio, nbytes, zp->z_directio);
+			    uio, nbytes, (ioflag & O_DIRECT) != 0);
 		}
 
 		if (error) {
@@ -837,12 +842,18 @@ zfs_write(struct inode *ip, uio_t *uio, int ioflag, cred_t *cr)
 			} else {
 				ASSERT(xuio || tx_bytes == max_blksz);
 				dmu_assign_arcbuf(sa_get_db(zp->z_sa_hdl),
-				    woff, zp->z_directio, abuf, tx);
+				    woff, (ioflag & O_DIRECT) != 0, abuf, tx);
 			}
 			ASSERT(tx_bytes <= uio->uio_resid);
 			uioskip(uio, tx_bytes);
 		}
 
+		/*
+		 * XXX making O_DIRECT bypass update_pages() means that
+		 * this write can be later overwritten by the wrong data
+		 * (from the mapped page which does not have this
+		 * modification).
+		 */
 		if (tx_bytes && zp->z_is_mapped && !(ioflag & O_DIRECT))
 			update_pages(ip, woff, tx_bytes, zsb->z_os, zp->z_id);
 
