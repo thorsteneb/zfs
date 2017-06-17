@@ -469,6 +469,9 @@ backup_cb(spa_t *spa, zilog_t *zilog, const blkptr_t *bp,
 	if (issig(JUSTLOOKING) && issig(FORREAL))
 		return (SET_ERROR(EINTR));
 
+	if (bp == NULL)
+		return (0);
+
 	if (zb->zb_object != DMU_META_DNODE_OBJECT &&
 	    DMU_OBJECT_IS_SPECIAL(zb->zb_object)) {
 		return (0);

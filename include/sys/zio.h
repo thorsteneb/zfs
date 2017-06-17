@@ -294,6 +294,9 @@ struct zbookmark_phys {
 #define	ZB_ZIL_OBJECT		(0ULL)
 #define	ZB_ZIL_LEVEL		(-2LL)
 
+#define	ZB_DNODE_LEVEL		(-3LL)
+#define	ZB_DNODE_BLKID		(0ULL)
+
 #define	ZB_IS_ZERO(zb)						\
 	((zb)->zb_objset == 0 && (zb)->zb_object == 0 &&	\
 	(zb)->zb_level == 0 && (zb)->zb_blkid == 0)
