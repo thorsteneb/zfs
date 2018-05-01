@@ -710,6 +710,7 @@ dbuf_evict_notify(void)
 	 * their tsd values so that we ensure that they only evict one dbuf
 	 * from the dbuf cache.
 	 */
+	ASSERT(tsd_get(zfs_dbuf_evict_key) == NULL);
 	if (tsd_get(zfs_dbuf_evict_key) != NULL)
 		return;
 
@@ -1160,7 +1161,7 @@ dbuf_read_done(zio_t *zio, const zbookmark_phys_t *zb, const blkptr_t *bp,
 		db->db_state = DB_UNCACHED;
 	}
 	cv_broadcast(&db->db_changed);
-	dbuf_rele_and_unlock(db, NULL);
+	dbuf_rele_and_unlock(db, NULL, B_FALSE);
 }
 
 static int
@@ -2475,8 +2476,10 @@ dbuf_destroy(dmu_buf_impl_t *db)
 	 * If this dbuf is referenced from an indirect dbuf,
 	 * decrement the ref count on the indirect dbuf.
 	 */
-	if (parent && parent != dndb)
-		dbuf_rele(parent, db);
+	if (parent && parent != dndb) {
+		mutex_enter(&parent->db_mtx);
+		dbuf_rele_and_unlock(parent, db, B_TRUE);
+	}
 }
 
 /*
@@ -3203,7 +3206,7 @@ void
 dbuf_rele(dmu_buf_impl_t *db, void *tag)
 {
 	mutex_enter(&db->db_mtx);
-	dbuf_rele_and_unlock(db, tag);
+	dbuf_rele_and_unlock(db, tag, B_FALSE);
 }
 
 void
@@ -3214,10 +3217,12 @@ dmu_buf_rele(dmu_buf_t *db, void *tag)
 
 /*
  * dbuf_rele() for an already-locked dbuf.  This is necessary to allow
- * db_dirtycnt and db_holds to be updated atomically.
+ * db_dirtycnt and db_holds to be updated atomically.  The 'evicting'
+ * argument should be set if we are already in the dbuf-evicting code
+ * path, in which case we don't want to recursively evict.
  */
 void
-dbuf_rele_and_unlock(dmu_buf_impl_t *db, void *tag)
+dbuf_rele_and_unlock(dmu_buf_impl_t *db, void *tag, boolean_t evicting)
 {
 	int64_t holds;
 
@@ -3318,7 +3323,8 @@ dbuf_rele_and_unlock(dmu_buf_impl_t *db, void *tag)
 				    refcount_count(&dbuf_cache_size));
 				mutex_exit(&db->db_mtx);
 
-				dbuf_evict_notify();
+				if (!evicting)
+					dbuf_evict_notify();
 			}
 
 			if (do_arc_evict)
@@ -3655,7 +3661,7 @@ dbuf_sync_leaf(dbuf_dirty_record_t *dr, dmu_tx_t *tx)
 		kmem_free(dr, sizeof (dbuf_dirty_record_t));
 		ASSERT(db->db_dirtycnt > 0);
 		db->db_dirtycnt -= 1;
-		dbuf_rele_and_unlock(db, (void *)(uintptr_t)txg);
+		dbuf_rele_and_unlock(db, (void *)(uintptr_t)txg, B_FALSE);
 		return;
 	}
 
@@ -4028,7 +4034,7 @@ dbuf_write_done(zio_t *zio, arc_buf_t *buf, void *vdb)
 	ASSERT(db->db_dirtycnt > 0);
 	db->db_dirtycnt -= 1;
 	db->db_data_pending = NULL;
-	dbuf_rele_and_unlock(db, (void *)(uintptr_t)tx->tx_txg);
+	dbuf_rele_and_unlock(db, (void *)(uintptr_t)tx->tx_txg, B_FALSE);
 }
 
 static void
