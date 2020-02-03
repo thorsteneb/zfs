@@ -572,12 +572,17 @@ spa_io_history_update(kstat_t *ksp, int rw)
 	return (0);
 }
 
+int spa_io_history_enabled = 0;
+
 static void
 spa_io_history_init(spa_t *spa)
 {
 	spa_history_kstat_t *shk = &spa->spa_stats.io_history;
 	char *name;
 	kstat_t *ksp;
+
+	if (!spa_io_history_enabled)
+		return;
 
 	mutex_init(&shk->lock, NULL, MUTEX_DEFAULT, NULL);
 
@@ -1030,5 +1035,9 @@ MODULE_PARM_DESC(zfs_txg_history,
 module_param(zfs_multihost_history, int, 0644);
 MODULE_PARM_DESC(zfs_multihost_history,
 	"Historical statistics for last N multihost writes");
+
+module_param(spa_io_history_enabled, int, 0644);
+MODULE_PARM_DESC(spa_io_history_enabled,
+	"keep io history");
 /* END CSTYLED */
 #endif
