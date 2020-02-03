@@ -1434,7 +1434,7 @@ dbuf_read_impl(dmu_buf_impl_t *db, zio_t *zio, uint32_t flags,
 {
 	dnode_t *dn;
 	zbookmark_phys_t zb;
-	uint32_t aflags = ARC_FLAG_NOWAIT;
+	arc_flags_t aflags = ARC_FLAG_NOWAIT;
 	int err, zio_flags;
 	boolean_t bonus_read;
 

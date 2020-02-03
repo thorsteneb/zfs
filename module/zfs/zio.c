@@ -2248,6 +2248,33 @@ zio_nowait(zio_t *zio)
 	__zio_execute(zio);
 }
 
+void
+zio_nowait_faster(zio_t *zio)
+{
+	ASSERT3P(zio->io_executor, ==, NULL);
+
+	if (zio->io_child_type == ZIO_CHILD_LOGICAL &&
+	    zio_unique_parent(zio) == NULL) {
+		zio_t *pio;
+
+		/*
+		 * This is a logical async I/O with no parent to wait for it.
+		 * We add it to the spa_async_root_zio "Godfather" I/O which
+		 * will ensure they complete prior to unloading the pool.
+		 */
+		spa_t *spa = zio->io_spa;
+		kpreempt_disable();
+		pio = spa->spa_async_zio_root[CPU_SEQID];
+		kpreempt_enable();
+
+		zio_add_child(pio, zio);
+	}
+
+	ASSERT0(zio->io_queued_timestamp);
+	zio->io_queued_timestamp = gethrtime();
+	zio_taskq_dispatch(zio, ZIO_TASKQ_ISSUE, B_FALSE);
+}
+
 /*
  * ==========================================================================
  * Reexecute, cancel, or suspend/resume failed I/O
