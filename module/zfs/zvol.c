@@ -138,7 +138,6 @@ struct zvol_state {
 };
 
 typedef enum {
-	ZVOL_ASYNC_CREATE_MINORS,
 	ZVOL_ASYNC_REMOVE_MINORS,
 	ZVOL_ASYNC_RENAME_MINORS,
 	ZVOL_ASYNC_SET_SNAPDEV,
@@ -2091,17 +2090,14 @@ zvol_create_minors_cb(const char *dsname, void *arg)
  * 'visible' (which also verifies that the parent is a zvol), and if so,
  * a minor node for that snapshot is created.
  */
-static int
-zvol_create_minors_impl(const char *name)
+void
+zvol_create_minors_recursive(const char *name)
 {
-	int error = 0;
-	fstrans_cookie_t cookie;
-	char *atp, *parent;
 	list_t minors_list;
 	minors_job_t *job;
 
 	if (zvol_inhibit_dev)
-		return (0);
+		return;
 
 	/*
 	 * This is the list for prefetch jobs. Whenever we found a match
@@ -2115,26 +2111,22 @@ zvol_create_minors_impl(const char *name)
 	list_create(&minors_list, sizeof (minors_job_t),
 	    offsetof(minors_job_t, link));
 
-	parent = kmem_alloc(MAXPATHLEN, KM_SLEEP);
-	(void) strlcpy(parent, name, MAXPATHLEN);
 
-	if ((atp = strrchr(parent, '@')) != NULL) {
+	if (strchr(name, '@') != NULL) {
 		uint64_t snapdev;
 
-		*atp = '\0';
-		error = dsl_prop_get_integer(parent, "snapdev",
+		int error = dsl_prop_get_integer(name, "snapdev",
 		    &snapdev, NULL);
 
 		if (error == 0 && snapdev == ZFS_SNAPDEV_VISIBLE)
-			error = zvol_create_minor_impl(name);
+			(void) zvol_create_minor_impl(name);
 	} else {
-		cookie = spl_fstrans_mark();
-		error = dmu_objset_find(parent, zvol_create_minors_cb,
+		fstrans_cookie_t cookie = spl_fstrans_mark();
+		(void) dmu_objset_find((char *)name, zvol_create_minors_cb,
 		    &minors_list, DS_FIND_CHILDREN);
 		spl_fstrans_unmark(cookie);
 	}
 
-	kmem_free(parent, MAXPATHLEN);
 	taskq_wait_outstanding(system_taskq, 0);
 
 	/*
@@ -2144,14 +2136,40 @@ zvol_create_minors_impl(const char *name)
 	while ((job = list_head(&minors_list)) != NULL) {
 		list_remove(&minors_list, job);
 		if (!job->error)
-			zvol_create_minor_impl(job->name);
+			(void) zvol_create_minor_impl(job->name);
 		strfree(job->name);
 		kmem_free(job, sizeof (minors_job_t));
 	}
 
 	list_destroy(&minors_list);
+}
 
-	return (SET_ERROR(error));
+void
+zvol_create_minor(const char *name)
+{
+	/*
+	 * Note: the dsl_pool_config_lock must not be held.
+	 * Minor node creation needs to obtain the zvol_state_lock.
+	 * zvol_open() obtains the zvol_state_lock and then the dsl pool
+	 * config lock.  Therefore, we can't have the config lock now if
+	 * we are going to wait for the zvol_state_lock, because it
+	 * would be a lock order inversion which could lead to deadlock.
+	 */
+
+	if (zvol_inhibit_dev)
+		return;
+
+	if (strchr(name, '@') != NULL) {
+		uint64_t snapdev;
+
+		int error = dsl_prop_get_integer(name,
+		    "snapdev", &snapdev, NULL);
+
+		if (error == 0 && snapdev == ZFS_SNAPDEV_VISIBLE)
+			(void) zvol_create_minor_impl(name);
+	} else {
+		(void) zvol_create_minor_impl(name);
+	}
 }
 
 /*
@@ -2363,7 +2381,7 @@ zvol_set_volmode_impl(char *name, uint64_t volmode)
 	/*
 	 * It's unfortunate we need to remove minors before we create new ones:
 	 * this is necessary because our backing gendisk (zvol_state->zv_disk)
-	 * coule be different when we set, for instance, volmode from "geom"
+	 * could be different when we set, for instance, volmode from "geom"
 	 * to "dev" (or vice versa).
 	 * A possible optimization is to modify our consumers so we don't get
 	 * called when "volmode" does not change.
@@ -2423,14 +2441,11 @@ zvol_task_free(zvol_task_t *task)
  * The worker thread function performed asynchronously.
  */
 static void
-zvol_task_cb(void *param)
+zvol_task_cb(void *arg)
 {
-	zvol_task_t *task = (zvol_task_t *)param;
+	zvol_task_t *task = arg;
 
 	switch (task->op) {
-	case ZVOL_ASYNC_CREATE_MINORS:
-		(void) zvol_create_minors_impl(task->name1);
-		break;
 	case ZVOL_ASYNC_REMOVE_MINORS:
 		zvol_remove_minors_impl(task->name1);
 		break;
@@ -2629,21 +2644,6 @@ zvol_set_volmode(const char *ddname, zprop_source_t source, uint64_t volmode)
 
 	return (dsl_sync_task(ddname, zvol_set_volmode_check,
 	    zvol_set_volmode_sync, &zsda, 0, ZFS_SPACE_CHECK_NONE));
-}
-
-void
-zvol_create_minors(spa_t *spa, const char *name, boolean_t async)
-{
-	zvol_task_t *task;
-	taskqid_t id;
-
-	task = zvol_task_alloc(ZVOL_ASYNC_CREATE_MINORS, name, NULL, ~0ULL);
-	if (task == NULL)
-		return;
-
-	id = taskq_dispatch(spa->spa_zvol_taskq, zvol_task_cb, task, TQ_SLEEP);
-	if ((async == B_FALSE) && (id != TASKQID_INVALID))
-		taskq_wait_id(spa->spa_zvol_taskq, id);
 }
 
 void

@@ -5132,7 +5132,7 @@ spa_open_common(const char *pool, spa_t **spapp, void *tag, nvlist_t *nvpolicy,
 	}
 
 	if (firstopen)
-		zvol_create_minors(spa, spa_name(spa), B_TRUE);
+		zvol_create_minors_recursive(spa_name(spa));
 
 	*spapp = spa;
 
@@ -6089,9 +6089,9 @@ spa_import(char *pool, nvlist_t *config, nvlist_t *props, uint64_t flags)
 
 	spa_event_notify(spa, NULL, NULL, ESC_ZFS_POOL_IMPORT);
 
-	zvol_create_minors(spa, pool, B_TRUE);
-
 	mutex_exit(&spa_namespace_lock);
+
+	zvol_create_minors_recursive(pool);
 
 	return (0);
 }
