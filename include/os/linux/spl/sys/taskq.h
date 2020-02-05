@@ -42,6 +42,7 @@
 #define	TASKQ_DYNAMIC		0x00000004
 #define	TASKQ_THREADS_CPU_PCT	0x00000008
 #define	TASKQ_DC_BATCH		0x00000010
+#define	TASKQ_INTERRUPT		0x00000020
 #define	TASKQ_ACTIVE		0x80000000
 
 /*
@@ -100,6 +101,7 @@ typedef struct taskq {
 	spl_wait_queue_head_t	tq_work_waitq;	/* new work waitq */
 	spl_wait_queue_head_t	tq_wait_waitq;	/* wait waitq */
 	tq_lock_role_t		tq_lock_class;	/* class when taking tq_lock */
+	boolean_t		tq_interrupt;	/* used from interrupt ctx */
 } taskq_t;
 
 typedef struct taskq_ent {

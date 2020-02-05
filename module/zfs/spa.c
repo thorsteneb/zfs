@@ -1017,6 +1017,14 @@ spa_taskqs_init(spa_t *spa, zio_type_t t, zio_taskq_type_t q)
 		break;
 	}
 
+	/*
+	 * Only the interrupt zio taskqs can be used from interrupt context,
+	 * and therefore the taskq locking will need to mask off interrupts
+	 * to prevent lock recursion.
+	 */
+	if (q == ZIO_TASKQ_INTERRUPT || q == ZIO_TASKQ_INTERRUPT_HIGH)
+		flags |= TASKQ_INTERRUPT;
+
 	for (uint_t i = 0; i < count; i++) {
 		taskq_t *tq;
 		char name[32];

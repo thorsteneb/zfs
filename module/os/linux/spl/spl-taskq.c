@@ -65,6 +65,41 @@ LIST_HEAD(tq_list);
 struct rw_semaphore tq_list_sem;
 static uint_t taskq_tsd;
 
+#if 1
+#define TQ_LOCK_ENTER(tq, irqflags) \
+do { \
+	if ((tq)->tq_interrupt) { \
+		spin_lock_irqsave_nested(&(tq)->tq_lock, irqflags, \
+		    (tq)->tq_lock_class); \
+	} else { \
+		ASSERT(!in_irq()); \
+		irqflags = 0; /* suppress uninitialized variable warning */ \
+		spin_lock_nested(&(tq)->tq_lock, (tq)->tq_lock_class); \
+	} \
+} while (0)
+
+#define TQ_LOCK_EXIT(tq, irqflags) \
+do { \
+	if ((tq)->tq_interrupt) { \
+		spin_unlock_irqrestore(&(tq)->tq_lock, irqflags); \
+	} else { \
+		spin_unlock(&(tq)->tq_lock); \
+	} \
+} while (0)
+#else
+#define TQ_LOCK_ENTER(tq, irqflags) \
+do { \
+	IMPLY(in_irq(), (tq)->tq_interrupt); \
+	spin_lock_irqsave_nested(&(tq)->tq_lock, irqflags, \
+	    (tq)->tq_lock_class); \
+} while (0)
+
+#define TQ_LOCK_EXIT(tq, irqflags) \
+do { \
+	spin_unlock_irqrestore(&(tq)->tq_lock, irqflags); \
+} while (0)
+#endif
+
 static int
 task_km_flags(uint_t flags)
 {
@@ -138,19 +173,18 @@ retry:
 		 * end up delaying the task allocation by one second, thereby
 		 * throttling the task dispatch rate.
 		 */
-		spin_unlock_irqrestore(&tq->tq_lock, *irqflags);
+		TQ_LOCK_EXIT(tq, *irqflags);
 		schedule_timeout(HZ / 100);
-		spin_lock_irqsave_nested(&tq->tq_lock, *irqflags,
-		    tq->tq_lock_class);
+		TQ_LOCK_ENTER(tq, *irqflags);
 		if (count < 100) {
 			count++;
 			goto retry;
 		}
 	}
 
-	spin_unlock_irqrestore(&tq->tq_lock, *irqflags);
+	TQ_LOCK_EXIT(tq, *irqflags);
 	t = kmem_alloc(sizeof (taskq_ent_t), task_km_flags(flags));
-	spin_lock_irqsave_nested(&tq->tq_lock, *irqflags, tq->tq_lock_class);
+	TQ_LOCK_ENTER(tq, *irqflags);
 
 	if (t) {
 		taskq_init_ent(t);
@@ -215,11 +249,11 @@ task_expire_impl(taskq_ent_t *t)
 	struct list_head *l = NULL;
 	unsigned long flags;
 
-	spin_lock_irqsave_nested(&tq->tq_lock, flags, tq->tq_lock_class);
+	TQ_LOCK_ENTER(tq, flags);
 
 	if (t->tqent_flags & TQENT_FLAG_CANCEL) {
 		ASSERT(list_empty(&t->tqent_list));
-		spin_unlock_irqrestore(&tq->tq_lock, flags);
+		TQ_LOCK_EXIT(tq, flags);
 		return;
 	}
 
@@ -241,7 +275,7 @@ task_expire_impl(taskq_ent_t *t)
 	if (l == &tq->tq_prio_list)
 		list_add(&t->tqent_list, &tq->tq_prio_list);
 
-	spin_unlock_irqrestore(&tq->tq_lock, flags);
+	TQ_LOCK_EXIT(tq, flags);
 
 	wake_up(&tq->tq_work_waitq);
 }
@@ -413,9 +447,9 @@ taskq_wait_id_check(taskq_t *tq, taskqid_t id)
 	int rc;
 	unsigned long flags;
 
-	spin_lock_irqsave_nested(&tq->tq_lock, flags, tq->tq_lock_class);
+	TQ_LOCK_ENTER(tq, flags);
 	rc = (taskq_find(tq, id) == NULL);
-	spin_unlock_irqrestore(&tq->tq_lock, flags);
+	TQ_LOCK_EXIT(tq, flags);
 
 	return (rc);
 }
@@ -437,9 +471,9 @@ taskq_wait_outstanding_check(taskq_t *tq, taskqid_t id)
 	int rc;
 	unsigned long flags;
 
-	spin_lock_irqsave_nested(&tq->tq_lock, flags, tq->tq_lock_class);
+	TQ_LOCK_ENTER(tq, flags);
 	rc = (id < tq->tq_lowest_id);
-	spin_unlock_irqrestore(&tq->tq_lock, flags);
+	TQ_LOCK_EXIT(tq, flags);
 
 	return (rc);
 }
@@ -465,9 +499,9 @@ taskq_wait_check(taskq_t *tq)
 	int rc;
 	unsigned long flags;
 
-	spin_lock_irqsave_nested(&tq->tq_lock, flags, tq->tq_lock_class);
+	TQ_LOCK_ENTER(tq, flags);
 	rc = (tq->tq_lowest_id == tq->tq_next_id);
-	spin_unlock_irqrestore(&tq->tq_lock, flags);
+	TQ_LOCK_EXIT(tq, flags);
 
 	return (rc);
 }
@@ -513,7 +547,7 @@ taskq_cancel_id(taskq_t *tq, taskqid_t id)
 
 	ASSERT(tq);
 
-	spin_lock_irqsave_nested(&tq->tq_lock, flags, tq->tq_lock_class);
+	TQ_LOCK_ENTER(tq, flags);
 	t = taskq_find(tq, id);
 	if (t && t != ERR_PTR(-EBUSY)) {
 		list_del_init(&t->tqent_list);
@@ -533,10 +567,9 @@ taskq_cancel_id(taskq_t *tq, taskqid_t id)
 		 * drop the lock before synchronously cancelling the timer.
 		 */
 		if (timer_pending(&t->tqent_timer)) {
-			spin_unlock_irqrestore(&tq->tq_lock, flags);
+			TQ_LOCK_EXIT(tq, flags);
 			del_timer_sync(&t->tqent_timer);
-			spin_lock_irqsave_nested(&tq->tq_lock, flags,
-			    tq->tq_lock_class);
+			TQ_LOCK_ENTER(tq, flags);
 		}
 
 		if (!(t->tqent_flags & TQENT_FLAG_PREALLOC))
@@ -544,7 +577,7 @@ taskq_cancel_id(taskq_t *tq, taskqid_t id)
 
 		rc = 0;
 	}
-	spin_unlock_irqrestore(&tq->tq_lock, flags);
+	TQ_LOCK_EXIT(tq, flags);
 
 	if (t == ERR_PTR(-EBUSY)) {
 		taskq_wait_id(tq, id);
@@ -567,7 +600,7 @@ taskq_dispatch(taskq_t *tq, task_func_t func, void *arg, uint_t flags)
 	ASSERT(tq);
 	ASSERT(func);
 
-	spin_lock_irqsave_nested(&tq->tq_lock, irqflags, tq->tq_lock_class);
+	TQ_LOCK_ENTER(tq, irqflags);
 
 	/* Taskq being destroyed and all tasks drained */
 	if (!(tq->tq_flags & TASKQ_ACTIVE))
@@ -617,7 +650,7 @@ out:
 	if (!(flags & TQ_NOQUEUE) && tq->tq_nactive == tq->tq_nthreads)
 		(void) taskq_thread_spawn(tq);
 
-	spin_unlock_irqrestore(&tq->tq_lock, irqflags);
+	TQ_LOCK_EXIT(tq, irqflags);
 	return (rc);
 }
 EXPORT_SYMBOL(taskq_dispatch);
@@ -633,7 +666,7 @@ taskq_dispatch_delay(taskq_t *tq, task_func_t func, void *arg,
 	ASSERT(tq);
 	ASSERT(func);
 
-	spin_lock_irqsave_nested(&tq->tq_lock, irqflags, tq->tq_lock_class);
+	TQ_LOCK_ENTER(tq, irqflags);
 
 	/* Taskq being destroyed and all tasks drained */
 	if (!(tq->tq_flags & TASKQ_ACTIVE))
@@ -663,7 +696,7 @@ out:
 	/* Spawn additional taskq threads if required. */
 	if (tq->tq_nactive == tq->tq_nthreads)
 		(void) taskq_thread_spawn(tq);
-	spin_unlock_irqrestore(&tq->tq_lock, irqflags);
+	TQ_LOCK_EXIT(tq, irqflags);
 	return (rc);
 }
 EXPORT_SYMBOL(taskq_dispatch_delay);
@@ -676,8 +709,7 @@ taskq_dispatch_ent(taskq_t *tq, task_func_t func, void *arg, uint_t flags,
 	ASSERT(tq);
 	ASSERT(func);
 
-	spin_lock_irqsave_nested(&tq->tq_lock, irqflags,
-	    tq->tq_lock_class);
+	TQ_LOCK_ENTER(tq, irqflags);
 
 	/* Taskq being destroyed and all tasks drained */
 	if (!(tq->tq_flags & TASKQ_ACTIVE)) {
@@ -724,13 +756,19 @@ taskq_dispatch_ent(taskq_t *tq, task_func_t func, void *arg, uint_t flags,
 
 	spin_unlock(&t->tqent_lock);
 
-	wake_up(&tq->tq_work_waitq);
+	if (tq->tq_interrupt) {
+		wake_up(&tq->tq_work_waitq);
+	} else {
+		spin_lock(&tq->tq_work_waitq.lock);
+		wake_up_locked(&tq->tq_work_waitq);
+		spin_unlock(&tq->tq_work_waitq.lock);
+	}
 out:
 	/* Spawn additional taskq threads if required. */
 	if (tq->tq_nactive == tq->tq_nthreads)
 		(void) taskq_thread_spawn(tq);
 out2:
-	spin_unlock_irqrestore(&tq->tq_lock, irqflags);
+	TQ_LOCK_EXIT(tq, irqflags);
 }
 EXPORT_SYMBOL(taskq_dispatch_ent);
 
@@ -786,10 +824,9 @@ taskq_thread_spawn_task(void *arg)
 
 	if (taskq_thread_create(tq) == NULL) {
 		/* restore spawning count if failed */
-		spin_lock_irqsave_nested(&tq->tq_lock, flags,
-		    tq->tq_lock_class);
+		TQ_LOCK_ENTER(tq, flags);
 		tq->tq_nspawn--;
-		spin_unlock_irqrestore(&tq->tq_lock, flags);
+		TQ_LOCK_EXIT(tq, flags);
 	}
 }
 
@@ -869,7 +906,7 @@ taskq_thread(void *args)
 	flush_signals(current);
 
 	tsd_set(taskq_tsd, tq);
-	spin_lock_irqsave_nested(&tq->tq_lock, flags, tq->tq_lock_class);
+	TQ_LOCK_ENTER(tq, flags);
 	/*
 	 * If we are dynamically spawned, decrease spawning count. Note that
 	 * we could be created during taskq_create, in which case we shouldn't
@@ -899,13 +936,12 @@ taskq_thread(void *args)
 			}
 
 			add_wait_queue_exclusive(&tq->tq_work_waitq, &wait);
-			spin_unlock_irqrestore(&tq->tq_lock, flags);
+			TQ_LOCK_EXIT(tq, flags);
 
 			schedule();
 			seq_tasks = 0;
 
-			spin_lock_irqsave_nested(&tq->tq_lock, flags,
-			    tq->tq_lock_class);
+			TQ_LOCK_ENTER(tq, flags);
 			remove_wait_queue(&tq->tq_work_waitq, &wait);
 		} else {
 			__set_current_state(TASK_RUNNING);
@@ -935,7 +971,7 @@ taskq_thread(void *args)
 
 			taskq_insert_in_order(tq, tqt);
 			tq->tq_nactive++;
-			spin_unlock_irqrestore(&tq->tq_lock, flags);
+			TQ_LOCK_EXIT(tq, flags);
 
 			DTRACE_PROBE1(taskq_ent__start, taskq_ent_t *, t);
 
@@ -944,8 +980,7 @@ taskq_thread(void *args)
 
 			DTRACE_PROBE1(taskq_ent__finish, taskq_ent_t *, t);
 
-			spin_lock_irqsave_nested(&tq->tq_lock, flags,
-			    tq->tq_lock_class);
+			TQ_LOCK_ENTER(tq, flags);
 			tq->tq_nactive--;
 			list_del_init(&tqt->tqt_active_list);
 			tqt->tqt_task = NULL;
@@ -985,7 +1020,7 @@ taskq_thread(void *args)
 	list_del_init(&tqt->tqt_thread_list);
 error:
 	kmem_free(tqt, sizeof (taskq_thread_t));
-	spin_unlock_irqrestore(&tq->tq_lock, flags);
+	TQ_LOCK_EXIT(tq, flags);
 
 	tsd_set(taskq_tsd, NULL);
 
@@ -1074,16 +1109,16 @@ taskq_create(const char *name, int nthreads, pri_t pri,
 	init_waitqueue_head(&tq->tq_wait_waitq);
 	tq->tq_lock_class = TQ_LOCK_GENERAL;
 	INIT_LIST_HEAD(&tq->tq_taskqs);
+	tq->tq_interrupt = (flags & TASKQ_INTERRUPT) != 0;
 
 	if (flags & TASKQ_PREPOPULATE) {
-		spin_lock_irqsave_nested(&tq->tq_lock, irqflags,
-		    tq->tq_lock_class);
+		TQ_LOCK_ENTER(tq, irqflags);
 
 		for (i = 0; i < minalloc; i++)
 			task_done(tq, task_alloc(tq, TQ_PUSHPAGE | TQ_NEW,
 			    &irqflags));
 
-		spin_unlock_irqrestore(&tq->tq_lock, irqflags);
+		TQ_LOCK_EXIT(tq, irqflags);
 	}
 
 	if ((flags & TASKQ_DYNAMIC) && spl_taskq_thread_dynamic)
@@ -1128,9 +1163,9 @@ taskq_destroy(taskq_t *tq)
 	unsigned long flags;
 
 	ASSERT(tq);
-	spin_lock_irqsave_nested(&tq->tq_lock, flags, tq->tq_lock_class);
+	TQ_LOCK_ENTER(tq, flags);
 	tq->tq_flags &= ~TASKQ_ACTIVE;
-	spin_unlock_irqrestore(&tq->tq_lock, flags);
+	TQ_LOCK_EXIT(tq, flags);
 
 	/*
 	 * When TASKQ_ACTIVE is clear new tasks may not be added nor may
@@ -1146,13 +1181,12 @@ taskq_destroy(taskq_t *tq)
 	list_del(&tq->tq_taskqs);
 	up_write(&tq_list_sem);
 
-	spin_lock_irqsave_nested(&tq->tq_lock, flags, tq->tq_lock_class);
+	TQ_LOCK_ENTER(tq, flags);
 	/* wait for spawning threads to insert themselves to the list */
 	while (tq->tq_nspawn) {
-		spin_unlock_irqrestore(&tq->tq_lock, flags);
+		TQ_LOCK_EXIT(tq, flags);
 		schedule_timeout_interruptible(1);
-		spin_lock_irqsave_nested(&tq->tq_lock, flags,
-		    tq->tq_lock_class);
+		TQ_LOCK_ENTER(tq, flags);
 	}
 
 	/*
@@ -1165,12 +1199,11 @@ taskq_destroy(taskq_t *tq)
 		tqt = list_entry(tq->tq_thread_list.next,
 		    taskq_thread_t, tqt_thread_list);
 		thread = tqt->tqt_thread;
-		spin_unlock_irqrestore(&tq->tq_lock, flags);
+		TQ_LOCK_EXIT(tq, flags);
 
 		kthread_stop(thread);
 
-		spin_lock_irqsave_nested(&tq->tq_lock, flags,
-		    tq->tq_lock_class);
+		TQ_LOCK_ENTER(tq, flags);
 	}
 
 	while (!list_empty(&tq->tq_free_list)) {
@@ -1192,7 +1225,7 @@ taskq_destroy(taskq_t *tq)
 	ASSERT(list_empty(&tq->tq_prio_list));
 	ASSERT(list_empty(&tq->tq_delay_list));
 
-	spin_unlock_irqrestore(&tq->tq_lock, flags);
+	TQ_LOCK_EXIT(tq, flags);
 
 	kmem_strfree(tq->tq_name);
 	kmem_free(tq, sizeof (taskq_t));
@@ -1228,8 +1261,7 @@ param_set_taskq_kick(const char *val, struct kernel_param *kp)
 
 	down_read(&tq_list_sem);
 	list_for_each_entry(tq, &tq_list, tq_taskqs) {
-		spin_lock_irqsave_nested(&tq->tq_lock, flags,
-		    tq->tq_lock_class);
+		TQ_LOCK_ENTER(tq, flags);
 		/* Check if the first pending is older than 5 seconds */
 		t = taskq_next_ent(tq);
 		if (t && time_after(jiffies, t->tqent_birth + 5*HZ)) {
@@ -1237,7 +1269,7 @@ param_set_taskq_kick(const char *val, struct kernel_param *kp)
 			printk(KERN_INFO "spl: Kicked taskq %s/%d\n",
 			    tq->tq_name, tq->tq_instance);
 		}
-		spin_unlock_irqrestore(&tq->tq_lock, flags);
+		TQ_LOCK_EXIT(tq, flags);
 	}
 	up_read(&tq_list_sem);
 	return (ret);
@@ -1275,7 +1307,8 @@ spl_taskq_init(void)
 	}
 
 	dynamic_taskq = taskq_create("spl_dynamic_taskq", 1,
-	    maxclsyspri, boot_ncpus, INT_MAX, TASKQ_PREPOPULATE);
+	    maxclsyspri, boot_ncpus, INT_MAX,
+	    TASKQ_PREPOPULATE|TASKQ_INTERRUPT);
 	if (dynamic_taskq == NULL) {
 		taskq_destroy(system_taskq);
 		taskq_destroy(system_delay_taskq);
