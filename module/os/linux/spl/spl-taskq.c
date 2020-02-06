@@ -756,6 +756,11 @@ taskq_dispatch_ent(taskq_t *tq, task_func_t func, void *arg, uint_t flags,
 
 	spin_unlock(&t->tqent_lock);
 
+	if (tq->tq_delay != 0) {
+		if (jiffies < tq->tq_last_wake + tq->tq_delay) {
+			goto out;
+		}
+	}
 	if (tq->tq_interrupt) {
 		wake_up(&tq->tq_work_waitq);
 	} else {
@@ -763,6 +768,7 @@ taskq_dispatch_ent(taskq_t *tq, task_func_t func, void *arg, uint_t flags,
 		wake_up_locked(&tq->tq_work_waitq);
 		spin_unlock(&tq->tq_work_waitq.lock);
 	}
+	tq->tq_last_wake = jiffies;
 out:
 	/* Spawn additional taskq threads if required. */
 	if (tq->tq_nactive == tq->tq_nthreads)
@@ -938,7 +944,10 @@ taskq_thread(void *args)
 			add_wait_queue_exclusive(&tq->tq_work_waitq, &wait);
 			TQ_LOCK_EXIT(tq, flags);
 
-			schedule();
+			if (tq->tq_delay != 0)
+				schedule_timeout(tq->tq_delay);
+			else
+				schedule();
 			seq_tasks = 0;
 
 			TQ_LOCK_ENTER(tq, flags);
@@ -1110,6 +1119,8 @@ taskq_create(const char *name, int nthreads, pri_t pri,
 	tq->tq_lock_class = TQ_LOCK_GENERAL;
 	INIT_LIST_HEAD(&tq->tq_taskqs);
 	tq->tq_interrupt = (flags & TASKQ_INTERRUPT) != 0;
+	tq->tq_delay = 0;
+	tq->tq_last_wake = 0;
 
 	if (flags & TASKQ_PREPOPULATE) {
 		TQ_LOCK_ENTER(tq, irqflags);

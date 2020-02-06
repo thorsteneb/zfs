@@ -975,6 +975,8 @@ spa_get_errlists(spa_t *spa, avl_tree_t *last, avl_tree_t *scrub)
 	    offsetof(spa_error_entry_t, se_avl));
 }
 
+int zfs_tq_delay = 1;
+
 static void
 spa_taskqs_init(spa_t *spa, zio_type_t t, zio_taskq_type_t q)
 {
@@ -1054,6 +1056,7 @@ spa_taskqs_init(spa_t *spa, zio_type_t t, zio_taskq_type_t q)
 			    INT_MAX, spa->spa_proc, flags);
 		}
 
+		tq->tq_delay = zfs_tq_delay;
 		tqs->stqs_taskq[i] = tq;
 	}
 }
@@ -9675,6 +9678,9 @@ EXPORT_SYMBOL(spa_prop_clear_bootfs);
 EXPORT_SYMBOL(spa_event_notify);
 
 /* BEGIN CSTYLED */
+ZFS_MODULE_PARAM(zfs_spa, zfs_, tq_delay, INT, ZMOD_RW,
+	"taskq delay");
+
 ZFS_MODULE_PARAM(zfs_spa, spa_, load_verify_shift, INT, ZMOD_RW,
 	"log2(fraction of arc that can be used by inflight I/Os when "
 	"verifying pool during import");

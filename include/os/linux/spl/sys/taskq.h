@@ -102,6 +102,8 @@ typedef struct taskq {
 	spl_wait_queue_head_t	tq_wait_waitq;	/* wait waitq */
 	tq_lock_role_t		tq_lock_class;	/* class when taking tq_lock */
 	boolean_t		tq_interrupt;	/* used from interrupt ctx */
+	long			tq_delay;	/* in jiffies, or 0 */
+	long			tq_last_wake;	/* in jiffies */
 } taskq_t;
 
 typedef struct taskq_ent {
