@@ -5563,6 +5563,12 @@ top:
 		if (HDR_IO_IN_PROGRESS(hdr)) {
 			zio_t *head_zio = hdr->b_l1hdr.b_acb->acb_zio_head;
 
+			if (*arc_flags & ARC_FLAG_CACHED_ONLY) {
+				mutex_exit(hash_lock);
+				rc = SET_ERROR(ENOENT);
+				goto out;
+			}
+
 			ASSERT3P(head_zio, !=, NULL);
 			if ((hdr->b_flags & ARC_FLAG_PRIO_ASYNC_READ) &&
 			    priority == ZIO_PRIORITY_SYNC_READ) {
@@ -5698,12 +5704,21 @@ top:
 		uint64_t size;
 		abd_t *hdr_abd;
 
+		if (*arc_flags & ARC_FLAG_CACHED_ONLY) {
+			rc = SET_ERROR(ENOENT);
+			if (hash_lock != NULL)
+				mutex_exit(hash_lock);
+			goto out;
+		}
+
 		/*
 		 * Gracefully handle a damaged logical block size as a
 		 * checksum error.
 		 */
 		if (lsize > spa_maxblocksize(spa)) {
 			rc = SET_ERROR(ECKSUM);
+			if (hash_lock != NULL)
+				mutex_exit(hash_lock);
 			goto out;
 		}
 
