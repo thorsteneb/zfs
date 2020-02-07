@@ -405,7 +405,7 @@ unsigned long zfs_arc_dnode_reduce_percent = 10;
 int zfs_arc_grow_retry = 0;
 int zfs_arc_shrink_shift = 0;
 int zfs_arc_p_min_shift = 0;
-int zfs_arc_average_blocksize = 8 * 1024; /* 8KB */
+int zfs_arc_average_blocksize = 4 * 1024; /* 4KB */
 
 /*
  * ARC dirty data constraints for arc_tempreserve_space() throttle.
