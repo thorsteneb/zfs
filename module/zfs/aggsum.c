@@ -85,9 +85,9 @@ aggsum_init(aggsum_t *as, uint64_t value)
 	bzero(as, sizeof (*as));
 	as->as_lower_bound = as->as_upper_bound = value;
 	mutex_init(&as->as_lock, NULL, MUTEX_DEFAULT, NULL);
-	as->as_numbuckets = boot_ncpus;
-	as->as_buckets = kmem_zalloc(boot_ncpus * sizeof (aggsum_bucket_t),
-	    KM_SLEEP);
+	as->as_numbuckets = boot_ncpus * 4;
+	as->as_buckets =
+	    kmem_zalloc(as->as_numbuckets * sizeof (aggsum_bucket_t), KM_SLEEP);
 	for (int i = 0; i < as->as_numbuckets; i++) {
 		mutex_init(&as->as_buckets[i].asc_lock,
 		    NULL, MUTEX_DEFAULT, NULL);

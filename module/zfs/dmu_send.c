@@ -73,7 +73,7 @@ int zfs_send_corrupt_data = B_FALSE;
  * thread is issuing new reads because the prefetches have fallen out of the
  * cache, this may need to be decreased.
  */
-int zfs_send_queue_length = SPA_MAXBLOCKSIZE;
+int zfs_send_queue_length = 128 * 1024 * 1024;
 /*
  * This tunable controls the length of the queues that zfs send worker threads
  * use to communicate.  If the send_main_thread is blocking on these queues,

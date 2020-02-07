@@ -109,7 +109,7 @@ multilist_create(size_t size, size_t offset,
 	if (zfs_multilist_num_sublists > 0) {
 		num_sublists = zfs_multilist_num_sublists;
 	} else {
-		num_sublists = MAX(boot_ncpus, 4);
+		num_sublists = boot_ncpus * 4;
 	}
 
 	return (multilist_create_impl(size, offset, num_sublists, index_func));
