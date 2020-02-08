@@ -5206,49 +5206,97 @@ zfs_ioc_recv_new(const char *fsname, nvlist_t *innvl, nvlist_t *outnvl)
 	return (error);
 }
 
-typedef struct dump_bytes_io {
-	zfs_file_t	*dbi_fp;
-	caddr_t		dbi_buf;
-	int		dbi_len;
-	int		dbi_err;
-} dump_bytes_io_t;
+typedef struct dump_bytes_arg {
+	zfs_file_t *dba_fp;
+	taskq_t *dba_tq;
+	char *dba_buf;
+	int dba_buf_len;
+	int dba_buf_fill;
+
+	/* protected by lock */
+	kmutex_t dba_lock;
+	kcondvar_t dba_cv;
+	int dba_err;
+	int dba_bytes_dispatched;
+} dump_bytes_arg_t;
+
+typedef struct dump_bytes_cb_arg {
+	dump_bytes_arg_t *dbca_dba;
+	char *dbca_buf;
+	int dbca_buf_len;
+	int dbca_buf_fill;
+} dump_bytes_cb_arg_t;
 
 static void
 dump_bytes_cb(void *arg)
 {
-	dump_bytes_io_t *dbi = (dump_bytes_io_t *)arg;
-	zfs_file_t *fp;
-	caddr_t buf;
+	dump_bytes_cb_arg_t *dbca = arg;
 
-	fp = dbi->dbi_fp;
-	buf = dbi->dbi_buf;
+	int err = zfs_file_write(dbca->dbca_dba->dba_fp,
+	    dbca->dbca_buf, dbca->dbca_buf_fill, NULL);
+	zio_buf_free(dbca->dbca_buf, dbca->dbca_buf_len);
 
-	dbi->dbi_err = zfs_file_write(fp, buf, dbi->dbi_len, NULL);
+	mutex_enter(&dbca->dbca_dba->dba_lock);
+	if (err != 0)
+		dbca->dbca_dba->dba_err = err;
+	ASSERT3U(dbca->dbca_dba->dba_bytes_dispatched, >=, dbca->dbca_buf_fill);
+	dbca->dbca_dba->dba_bytes_dispatched -= dbca->dbca_buf_fill;
+	cv_broadcast(&dbca->dbca_dba->dba_cv);
+	mutex_exit(&dbca->dbca_dba->dba_lock);
+	kmem_free(dbca, sizeof (*dbca));
+}
+
+static int zfs_send_one_output_buf_size = 1024 * 1024;
+static int zfs_send_entire_output_buf_size = 16 * 1024 * 1024;
+
+static void
+dump_bytes_dispatch(dump_bytes_arg_t *dba)
+{
+	mutex_enter(&dba->dba_lock);
+	while (dba->dba_bytes_dispatched >= zfs_send_entire_output_buf_size)
+		cv_wait(&dba->dba_cv, &dba->dba_lock);
+	dba->dba_bytes_dispatched += dba->dba_buf_fill;
+	mutex_exit(&dba->dba_lock);
+
+	dump_bytes_cb_arg_t *dbca = kmem_alloc(sizeof (*dbca), KM_SLEEP);
+	dbca->dbca_dba = dba;
+	dbca->dbca_buf = dba->dba_buf;
+	dbca->dbca_buf_len = dba->dba_buf_len;
+	dbca->dbca_buf_fill = dba->dba_buf_fill;
+	dba->dba_buf = NULL;
+	dba->dba_buf_len = 0;
+	dba->dba_buf_fill = 0;
+	taskq_dispatch(dba->dba_tq, dump_bytes_cb, dbca, TQ_SLEEP);
 }
 
 static int
 dump_bytes(objset_t *os, void *buf, int len, void *arg)
 {
-	dump_bytes_io_t dbi;
+	dump_bytes_arg_t *dba = arg;
 
-	dbi.dbi_fp = arg;
-	dbi.dbi_buf = buf;
-	dbi.dbi_len = len;
+	while (len > 0) {
 
-#if defined(HAVE_LARGE_STACKS)
-	dump_bytes_cb(&dbi);
-#else
-	/*
-	 * The vn_rdwr() call is performed in a taskq to ensure that there is
-	 * always enough stack space to write safely to the target filesystem.
-	 * The ZIO_TYPE_FREE threads are used because there can be a lot of
-	 * them and they are used in vdev_file.c for a similar purpose.
-	 */
-	spa_taskq_dispatch_sync(dmu_objset_spa(os), ZIO_TYPE_FREE,
-	    ZIO_TASKQ_ISSUE, dump_bytes_cb, &dbi, TQ_SLEEP);
-#endif /* HAVE_LARGE_STACKS */
+		if (dba->dba_buf == NULL) {
+			dba->dba_buf_len = zfs_send_one_output_buf_size;
+			dba->dba_buf = zio_buf_alloc(dba->dba_buf_len);
+			dba->dba_buf_fill = 0;
+		}
 
-	return (dbi.dbi_err);
+		/* XXX if len > 128K, we should avoid the bcopy and directly output the data */
+		int cur_len = MIN(len, dba->dba_buf_len - dba->dba_buf_fill);
+
+		bcopy(buf, dba->dba_buf + dba->dba_buf_fill, cur_len);
+
+		dba->dba_buf_fill += cur_len;
+		len -= cur_len;
+		buf = ((char *)buf) + cur_len;
+
+		if (dba->dba_buf_fill == dba->dba_buf_len) {
+			dump_bytes_dispatch(dba);
+		}
+	}
+
+	return (dba->dba_err);
 }
 
 /*
@@ -5336,18 +5384,28 @@ zfs_ioc_send(zfs_cmd_t *zc)
 		dsl_pool_rele(dp, FTAG);
 	} else {
 		zfs_file_t *fp;
-		dmu_send_outparams_t out = {0};
 
 		if ((error = zfs_file_get(zc->zc_cookie, &fp)))
 			return (error);
 
 		off = zfs_file_off(fp);
-		out.dso_outfunc = dump_bytes;
-		out.dso_arg = fp;
-		out.dso_dryrun = B_FALSE;
+		dump_bytes_arg_t dba = {
+			.dba_fp = fp,
+			.dba_buf = NULL,
+			.dba_tq = taskq_create("send_writer", 1, maxclsyspri, 1, INT_MAX, 0),
+			.dba_err = 0,
+		};
+		dmu_send_outparams_t out = {
+			.dso_outfunc = dump_bytes,
+			.dso_arg = &dba,
+			.dso_dryrun = B_FALSE,
+		};
 		error = dmu_send_obj(zc->zc_name, zc->zc_sendobj,
 		    zc->zc_fromobj, embedok, large_block_ok, compressok,
 		    rawok, savedok, zc->zc_cookie, &off, &out);
+		if (dba.dba_buf != NULL)
+			dump_bytes_dispatch(&dba);
+		taskq_destroy(dba.dba_tq);
 
 		zfs_file_put(zc->zc_cookie);
 	}
@@ -6296,13 +6354,28 @@ zfs_ioc_send_new(const char *snapname, nvlist_t *innvl, nvlist_t *outnvl)
 
 	off = zfs_file_off(fp);
 
-	dmu_send_outparams_t out = {0};
-	out.dso_outfunc = dump_bytes;
-	out.dso_arg = fp;
-	out.dso_dryrun = B_FALSE;
+	dump_bytes_arg_t dba = {
+		.dba_fp = fp,
+		.dba_buf = NULL,
+		.dba_tq = taskq_create("send_writer", 1, maxclsyspri, 1, INT_MAX, 0),
+		.dba_err = 0,
+		.dba_bytes_dispatched = 0,
+	};
+	mutex_init(&dba.dba_lock, NULL, MUTEX_DEFAULT, NULL);
+	cv_init(&dba.dba_cv, NULL, CV_DEFAULT, NULL);
+	dmu_send_outparams_t out = {
+		.dso_outfunc = dump_bytes,
+		.dso_arg = &dba,
+		.dso_dryrun = B_FALSE,
+	};
 	error = dmu_send(snapname, fromname, embedok, largeblockok,
 	    compressok, rawok, savedok, resumeobj, resumeoff,
 	    redactbook, fd, &off, &out);
+	if (dba.dba_buf != NULL)
+		dump_bytes_dispatch(&dba);
+	taskq_destroy(dba.dba_tq);
+	mutex_destroy(&dba.dba_lock);
+	cv_destroy(&dba.dba_cv);
 
 	zfs_file_put(fd);
 	return (error);

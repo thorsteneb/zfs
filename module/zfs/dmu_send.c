@@ -244,6 +244,8 @@ range_free(struct send_range *range)
 	kmem_free(range, sizeof (*range));
 }
 
+int zfs_send_checksum_payload = 1;
+
 /*
  * For all record types except BEGIN, fill in the checksum (overlaid in
  * drr_u.drr_checksum.drr_checksum).  The checksum verifies everything
@@ -282,7 +284,7 @@ dump_record(dmu_send_cookie_t *dscp, void *payload, int payload_len)
 		 * payload is null when dso_dryrun == B_TRUE (i.e. when we're
 		 * doing a send size calculation)
 		 */
-		if (payload != NULL) {
+		if (payload != NULL && zfs_send_checksum_payload) {
 			(void) fletcher_4_incremental_native(
 			    payload, payload_len, &dscp->dsc_zc);
 		}
@@ -3052,6 +3054,9 @@ out:
 }
 
 /* BEGIN CSTYLED */
+ZFS_MODULE_PARAM(zfs_send, zfs_send_, checksum_payload, INT, ZMOD_RW,
+	"checksum payload data (debugging only)");
+
 ZFS_MODULE_PARAM(zfs_send, zfs_send_, corrupt_data, INT, ZMOD_RW,
 	"Allow sending corrupt data");
 
