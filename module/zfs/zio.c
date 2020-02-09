@@ -977,10 +977,10 @@ zfs_blkptr_verify(spa_t *spa, const blkptr_t *bp, boolean_t config_held,
 	if (!spa->spa_trust_config)
 		return (B_TRUE);
 
-	if (!config_held)
-		spa_config_enter(spa, SCL_VDEV, bp, RW_READER);
-	else
-		ASSERT(spa_config_held(spa, SCL_VDEV, RW_WRITER));
+	if (!config_held) {
+		return (errors == 0);
+		//spa_config_enter(spa, SCL_VDEV, bp, RW_READER);
+	}
 	/*
 	 * Pool-specific checks.
 	 *
@@ -992,13 +992,7 @@ zfs_blkptr_verify(spa_t *spa, const blkptr_t *bp, boolean_t config_held,
 	for (int i = 0; i < BP_GET_NDVAS(bp); i++) {
 		uint64_t vdevid = DVA_GET_VDEV(&bp->blk_dva[i]);
 
-		if (vdevid >= spa->spa_root_vdev->vdev_children) {
-			errors += zfs_blkptr_verify_log(spa, bp, blk_verify,
-			    "blkptr at %p DVA %u has invalid VDEV %llu",
-			    bp, i, (longlong_t)vdevid);
-			continue;
-		}
-		vdev_t *vd = spa->spa_root_vdev->vdev_child[vdevid];
+		vdev_t *vd = vdev_lookup_top(spa, vdevid);
 		if (vd == NULL) {
 			errors += zfs_blkptr_verify_log(spa, bp, blk_verify,
 			    "blkptr at %p DVA %u has invalid VDEV %llu",
@@ -3720,6 +3714,7 @@ zio_vdev_io_start(zio_t *zio)
 		if (!(zio->io_flags & ZIO_FLAG_CONFIG_WRITER))
 			spa_config_enter(spa, SCL_ZIO, zio, RW_READER);
 
+		zfs_blkptr_verify(spa, zio->io_bp, B_TRUE, BLK_VERIFY_HALT);
 		/*
 		 * The mirror_ops handle multiple DVAs in a single BP.
 		 */
