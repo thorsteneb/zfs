@@ -656,6 +656,11 @@ dmu_objset_from_ds(dsl_dataset_t *ds, objset_t **osp)
 	ASSERT(dsl_pool_config_held(ds->ds_dir->dd_pool) ||
 	    dsl_dataset_long_held(ds));
 
+	if (ds->ds_objset != NULL) {
+		*osp = ds->ds_objset;
+		return (0);
+	}
+
 	mutex_enter(&ds->ds_opening_lock);
 	if (ds->ds_objset == NULL) {
 		objset_t *os;
