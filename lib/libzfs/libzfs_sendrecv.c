@@ -2480,6 +2480,7 @@ zfs_send(zfs_handle_t *zhp, const char *fromsnap, const char *tosnap,
 	dedup_arg_t dda = { 0 };
 	int featureflags = 0;
 	FILE *fout;
+	struct stat sb;
 
 	(void) snprintf(errbuf, sizeof (errbuf), dgettext(TEXT_DOMAIN,
 	    "cannot send '%s'"), zhp->zfs_name);
@@ -2489,6 +2490,13 @@ zfs_send(zfs_handle_t *zhp, const char *fromsnap, const char *tosnap,
 		    "zero-length incremental source"));
 		return (zfs_error(zhp->zfs_hdl, EZFS_NOENT, errbuf));
 	}
+
+	if (fstat(outfd, &sb) == -1) {
+		perror("fstat");
+		return (-2);
+	}
+	if (S_ISFIFO(sb.st_mode))
+		libzfs_set_pipe_max(outfd);
 
 	if (zhp->zfs_type == ZFS_TYPE_FILESYSTEM) {
 		uint64_t version;
