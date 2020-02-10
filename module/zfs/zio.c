@@ -2097,6 +2097,8 @@ static inline void
 __zio_execute(zio_t *zio)
 {
 	ASSERT3U(zio->io_queued_timestamp, >, 0);
+	boolean_t taskq_member_cached = B_FALSE;
+	boolean_t is_taskq_member;
 
 	while (zio->io_stage < ZIO_STAGE_DONE) {
 		enum zio_stage pipeline = zio->io_pipeline;
@@ -2123,12 +2125,17 @@ __zio_execute(zio_t *zio)
 		 * For VDEV_IO_START, we cut in line so that the io will
 		 * be sent to disk promptly.
 		 */
-		if ((stage & ZIO_BLOCKING_STAGES) && zio->io_vd == NULL &&
-		    zio_taskq_member(zio, ZIO_TASKQ_INTERRUPT)) {
-			boolean_t cut = (stage == ZIO_STAGE_VDEV_IO_START) ?
-			    zio_requeue_io_start_cut_in_line : B_FALSE;
-			zio_taskq_dispatch(zio, ZIO_TASKQ_ISSUE, cut);
-			return;
+		if ((stage & ZIO_BLOCKING_STAGES) && zio->io_vd == NULL) {
+			if (!taskq_member_cached) {
+				is_taskq_member = zio_taskq_member(zio, ZIO_TASKQ_INTERRUPT);
+				taskq_member_cached = B_TRUE;
+			}
+			if (is_taskq_member) {
+				boolean_t cut = (stage == ZIO_STAGE_VDEV_IO_START) ?
+				    zio_requeue_io_start_cut_in_line : B_FALSE;
+				zio_taskq_dispatch(zio, ZIO_TASKQ_ISSUE, cut);
+				return;
+			}
 		}
 
 		/*
