@@ -3436,6 +3436,11 @@ arc_alloc_compressed_buf(spa_t *spa, void *tag, uint64_t psize, uint64_t lsize,
 	arc_buf_thaw(buf);
 	ASSERT3P(hdr->b_l1hdr.b_freeze_cksum, ==, NULL);
 
+	/* XXX I think it will always be not shared.  We should
+	 * make arc_hdr_alloc() get a linear abd in this case, so that
+	 * arc_buf_alloc_impl() will automatically share it.
+	 * This functionality is added by the directio patch.
+	 */
 	if (!arc_buf_is_shared(buf)) {
 		/*
 		 * To ensure that the hdr has the correct data in it if we call
