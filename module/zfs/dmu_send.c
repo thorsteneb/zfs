@@ -230,6 +230,9 @@ range_free(struct send_range *range)
 		    (range->sru.object.dnp->dn_extra_slots + 1);
 		kmem_free(range->sru.object.dnp, size);
 	} else if (range->type == DATA) {
+		/* XXX could we check io_outstanding without taking the lock?
+		 * do we ever actually need to do this?
+		 */
 		mutex_enter(&range->sru.data.lock);
 		while (range->sru.data.io_outstanding)
 			cv_wait(&range->sru.data.cv, &range->sru.data.lock);
