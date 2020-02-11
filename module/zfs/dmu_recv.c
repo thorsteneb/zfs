@@ -106,6 +106,7 @@ struct receive_writer_arg {
 	boolean_t raw;   /* DMU_BACKUP_FEATURE_RAW set */
 	boolean_t spill; /* DRR_FLAG_SPILL_BLOCK set */
 	uint64_t last_object;
+	dnode_t *last_dnode;
 	uint64_t last_offset;
 	uint64_t max_object; /* highest object ID referenced in stream */
 	uint64_t bytes_read; /* bytes read when current record created */
@@ -1701,7 +1702,6 @@ receive_write(struct receive_writer_arg *rwa, struct drr_write *drrw,
 {
 	int err;
 	dmu_tx_t *tx;
-	dnode_t *dn;
 
 	if (drrw->drr_offset + drrw->drr_logical_size < drrw->drr_offset ||
 	    !DMU_OT_IS_VALID(drrw->drr_type))
@@ -1716,17 +1716,20 @@ receive_write(struct receive_writer_arg *rwa, struct drr_write *drrw,
 	    drrw->drr_offset < rwa->last_offset)) {
 		return (SET_ERROR(EINVAL));
 	}
-	rwa->last_object = drrw->drr_object;
+	if (drrw->drr_object != rwa->last_object) {
+		if (rwa->last_dnode != NULL)
+			dnode_rele(rwa->last_dnode, rwa);
+		if (dnode_hold(rwa->os, drrw->drr_object, rwa, &rwa->last_dnode) != 0)
+			return (SET_ERROR(EINVAL));
+		rwa->last_object = drrw->drr_object;
+	}
 	rwa->last_offset = drrw->drr_offset;
 
 	if (rwa->last_object > rwa->max_object)
 		rwa->max_object = rwa->last_object;
 
-	if (dmu_object_info(rwa->os, drrw->drr_object, NULL) != 0)
-		return (SET_ERROR(EINVAL));
-
 	tx = dmu_tx_create(rwa->os);
-	dmu_tx_hold_write(tx, drrw->drr_object,
+	dmu_tx_hold_write_by_dnode(tx, rwa->last_dnode,
 	    drrw->drr_offset, drrw->drr_logical_size);
 	err = dmu_tx_assign(tx, TXG_WAIT);
 	if (err != 0) {
@@ -1742,15 +1745,12 @@ receive_write(struct receive_writer_arg *rwa, struct drr_write *drrw,
 		    DRR_WRITE_PAYLOAD_SIZE(drrw));
 	}
 
-	/* use the bonus buf to look up the dnode in dmu_assign_arcbuf */
-	VERIFY0(dnode_hold(rwa->os, drrw->drr_object, FTAG, &dn));
-	err = dmu_assign_arcbuf_by_dnode(dn, drrw->drr_offset, abuf, tx);
+	err = dmu_assign_arcbuf_by_dnode(rwa->last_dnode,
+	    drrw->drr_offset, abuf, tx);
 	if (err != 0) {
-		dnode_rele(dn, FTAG);
 		dmu_tx_commit(tx);
 		return (err);
 	}
-	dnode_rele(dn, FTAG);
 
 	/*
 	 * Note: If the receive fails, we want the resume stream to start
@@ -2854,6 +2854,8 @@ dmu_recv_stream(dmu_recv_cookie_t *drc, int cleanup_fd,
 		}
 	}
 
+	if (rwa->last_dnode != NULL)
+		dnode_rele(rwa->last_dnode, rwa);
 	cv_destroy(&rwa->cv);
 	mutex_destroy(&rwa->mutex);
 	bqueue_destroy(&rwa->q);
