@@ -53,14 +53,17 @@ bqueue_init(bqueue_t *q, uint64_t fill_fraction, uint64_t size,
 	}
 	list_create(&q->bq_list, node_offset + sizeof (bqueue_node_t),
 	    node_offset + offsetof(bqueue_node_t, bqn_node));
-	list_create(&q->bq_dequeued_list, node_offset + sizeof (bqueue_node_t),
+	list_create(&q->bq_deqing_list, node_offset + sizeof (bqueue_node_t),
+	    node_offset + offsetof(bqueue_node_t, bqn_node));
+	list_create(&q->bq_enqing_list, node_offset + sizeof (bqueue_node_t),
 	    node_offset + offsetof(bqueue_node_t, bqn_node));
 	cv_init(&q->bq_add_cv, NULL, CV_DEFAULT, NULL);
 	cv_init(&q->bq_pop_cv, NULL, CV_DEFAULT, NULL);
 	mutex_init(&q->bq_lock, NULL, MUTEX_DEFAULT, NULL);
 	q->bq_node_offset = node_offset;
 	q->bq_size = 0;
-	q->bq_dequeued_size = 0;
+	q->bq_deqing_size = 0;
+	q->bq_enqing_size = 0;
 	q->bq_maxsize = size;
 	q->bq_fill_fraction = fill_fraction;
 	return (0);
@@ -76,11 +79,12 @@ bqueue_destroy(bqueue_t *q)
 {
 	mutex_enter(&q->bq_lock);
 	ASSERT0(q->bq_size);
-	ASSERT0(q->bq_dequeued_size);
+	ASSERT0(q->bq_deqing_size);
 	cv_destroy(&q->bq_add_cv);
 	cv_destroy(&q->bq_pop_cv);
 	list_destroy(&q->bq_list);
-	list_destroy(&q->bq_dequeued_list);
+	list_destroy(&q->bq_deqing_list);
+	list_destroy(&q->bq_enqing_list);
 	mutex_exit(&q->bq_lock);
 	mutex_destroy(&q->bq_lock);
 }
@@ -91,6 +95,25 @@ bqueue_enqueue_impl(bqueue_t *q, void *data, uint64_t item_size,
 {
 	ASSERT3U(item_size, >, 0);
 	ASSERT3U(item_size, <=, q->bq_maxsize);
+
+	obj2node(q, data)->bqn_size = item_size;
+	q->bq_enqing_size += item_size;
+	list_insert_tail(&q->bq_enqing_list, data);
+
+	if (flush ||
+	    q->bq_enqing_size >= q->bq_maxsize / q->bq_fill_fraction) {
+		mutex_enter(&q->bq_lock);
+		while (q->bq_size > q->bq_maxsize) {
+			cv_wait_sig(&q->bq_add_cv, &q->bq_lock);
+		}
+		q->bq_size += q->bq_enqing_size;
+		list_move_tail(&q->bq_list, &q->bq_enqing_list);
+		q->bq_enqing_size = 0;
+		cv_broadcast(&q->bq_pop_cv);
+		mutex_exit(&q->bq_lock);
+	}
+
+#if 0
 	mutex_enter(&q->bq_lock);
 	obj2node(q, data)->bqn_size = item_size;
 	while (q->bq_size + item_size > q->bq_maxsize) {
@@ -103,6 +126,7 @@ bqueue_enqueue_impl(bqueue_t *q, void *data, uint64_t item_size,
 	if (flush)
 		cv_broadcast(&q->bq_pop_cv);
 	mutex_exit(&q->bq_lock);
+#endif
 }
 
 /*
@@ -137,22 +161,22 @@ bqueue_enqueue_flush(bqueue_t *q, void *data, uint64_t item_size)
 void *
 bqueue_dequeue(bqueue_t *q)
 {
-	void *ret = list_remove_head(&q->bq_dequeued_list);
+	void *ret = list_remove_head(&q->bq_deqing_list);
 	if (ret == NULL) {
 		mutex_enter(&q->bq_lock);
 		while (q->bq_size == 0) {
 			cv_wait_sig(&q->bq_pop_cv, &q->bq_lock);
 		}
-		ASSERT0(q->bq_dequeued_size);
-		ASSERT(list_is_empty(&q->bq_dequeued_list));
-		list_move_tail(&q->bq_dequeued_list, &q->bq_list);
-		q->bq_dequeued_size = q->bq_size;
+		ASSERT0(q->bq_deqing_size);
+		ASSERT(list_is_empty(&q->bq_deqing_list));
+		list_move_tail(&q->bq_deqing_list, &q->bq_list);
+		q->bq_deqing_size = q->bq_size;
 		q->bq_size = 0;
 		cv_broadcast(&q->bq_add_cv);
 		mutex_exit(&q->bq_lock);
-		ret = list_remove_head(&q->bq_dequeued_list);
+		ret = list_remove_head(&q->bq_deqing_list);
 	}
-	q->bq_dequeued_size -= obj2node(q, ret)->bqn_size;
+	q->bq_deqing_size -= obj2node(q, ret)->bqn_size;
 	return (ret);
 #if 0
 	ret = list_remove_head(&q->bq_list);
@@ -170,5 +194,5 @@ bqueue_dequeue(bqueue_t *q)
 boolean_t
 bqueue_empty(bqueue_t *q)
 {
-	return (q->bq_size == 0 && q->bq_dequeued_size == 0);
+	return (q->bq_size == 0 && q->bq_deqing_size == 0);
 }

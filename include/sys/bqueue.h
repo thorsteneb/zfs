@@ -27,12 +27,14 @@ extern "C" {
 
 typedef struct bqueue {
 	list_t bq_list;
-	list_t bq_dequeued_list;
+	uint64_t bq_size;
+	list_t bq_deqing_list;
+	uint64_t bq_deqing_size;
+	list_t bq_enqing_list;
+	uint64_t bq_enqing_size;
 	kmutex_t bq_lock;
 	kcondvar_t bq_add_cv;
 	kcondvar_t bq_pop_cv;
-	uint64_t bq_size;
-	uint64_t bq_dequeued_size;
 	uint64_t bq_maxsize;
 	uint64_t bq_fill_fraction;
 	size_t bq_node_offset;
