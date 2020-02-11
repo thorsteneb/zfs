@@ -40,6 +40,9 @@ obj2node(bqueue_t *q, void *data)
  * Alternatively, this behavior can be disabled (causing signaling to happen
  * immediately) by setting fill_fraction to any value larger than size.
  * Return 0 on success, or -1 on failure.
+ *
+ * NOTE: we assume bqueue_dequeue() is not called concurrently with itself!
+ * (But it can be called concurrently with bqueue_enqueue().)
  */
 int
 bqueue_init(bqueue_t *q, uint64_t fill_fraction, uint64_t size,
@@ -50,11 +53,14 @@ bqueue_init(bqueue_t *q, uint64_t fill_fraction, uint64_t size,
 	}
 	list_create(&q->bq_list, node_offset + sizeof (bqueue_node_t),
 	    node_offset + offsetof(bqueue_node_t, bqn_node));
+	list_create(&q->bq_dequeued_list, node_offset + sizeof (bqueue_node_t),
+	    node_offset + offsetof(bqueue_node_t, bqn_node));
 	cv_init(&q->bq_add_cv, NULL, CV_DEFAULT, NULL);
 	cv_init(&q->bq_pop_cv, NULL, CV_DEFAULT, NULL);
 	mutex_init(&q->bq_lock, NULL, MUTEX_DEFAULT, NULL);
 	q->bq_node_offset = node_offset;
 	q->bq_size = 0;
+	q->bq_dequeued_size = 0;
 	q->bq_maxsize = size;
 	q->bq_fill_fraction = fill_fraction;
 	return (0);
@@ -70,9 +76,11 @@ bqueue_destroy(bqueue_t *q)
 {
 	mutex_enter(&q->bq_lock);
 	ASSERT0(q->bq_size);
+	ASSERT0(q->bq_dequeued_size);
 	cv_destroy(&q->bq_add_cv);
 	cv_destroy(&q->bq_pop_cv);
 	list_destroy(&q->bq_list);
+	list_destroy(&q->bq_dequeued_list);
 	mutex_exit(&q->bq_lock);
 	mutex_destroy(&q->bq_lock);
 }
@@ -129,20 +137,31 @@ bqueue_enqueue_flush(bqueue_t *q, void *data, uint64_t item_size)
 void *
 bqueue_dequeue(bqueue_t *q)
 {
-	void *ret = NULL;
-	uint64_t item_size;
-	mutex_enter(&q->bq_lock);
-	while (q->bq_size == 0) {
-		cv_wait_sig(&q->bq_pop_cv, &q->bq_lock);
+	void *ret = list_remove_head(&q->bq_dequeued_list);
+	if (ret == NULL) {
+		mutex_enter(&q->bq_lock);
+		while (q->bq_size == 0) {
+			cv_wait_sig(&q->bq_pop_cv, &q->bq_lock);
+		}
+		ASSERT0(q->bq_dequeued_size);
+		ASSERT(list_is_empty(&q->bq_dequeued_list));
+		list_move_tail(&q->bq_dequeued_list, &q->bq_list);
+		q->bq_dequeued_size = q->bq_size;
+		q->bq_size = 0;
+		cv_broadcast(&q->bq_add_cv);
+		mutex_exit(&q->bq_lock);
+		ret = list_remove_head(&q->bq_dequeued_list);
 	}
+	q->bq_dequeued_size -= obj2node(q, ret)->bqn_size;
+	return (ret);
+#if 0
 	ret = list_remove_head(&q->bq_list);
 	ASSERT3P(ret, !=, NULL);
 	item_size = obj2node(q, ret)->bqn_size;
 	q->bq_size -= item_size;
 	if (q->bq_size <= q->bq_maxsize - (q->bq_maxsize / q->bq_fill_fraction))
 		cv_signal(&q->bq_add_cv);
-	mutex_exit(&q->bq_lock);
-	return (ret);
+#endif
 }
 
 /*
@@ -151,5 +170,5 @@ bqueue_dequeue(bqueue_t *q)
 boolean_t
 bqueue_empty(bqueue_t *q)
 {
-	return (q->bq_size == 0);
+	return (q->bq_size == 0 && q->bq_dequeued_size == 0);
 }
