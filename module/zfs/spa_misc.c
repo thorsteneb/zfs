@@ -377,7 +377,7 @@ int spa_asize_inflation = 24;
  */
 int spa_slop_shift = 5;
 uint64_t spa_min_slop = 128 * 1024 * 1024;
-int spa_allocators = 4;
+int spa_allocators = 16;
 
 
 /*PRINTFLIKE2*/
