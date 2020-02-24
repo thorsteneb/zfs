@@ -113,6 +113,7 @@ icp_fini(void)
 	sha2_mod_fini();
 	sha1_mod_fini();
 	edonr_mod_fini();
+	blake3_mod_fini();
 	aes_mod_fini();
 	kcf_sched_destroy();
 	kcf_prov_tab_destroy();
@@ -141,6 +142,7 @@ icp_init(void)
 
 	/* initialize algorithms */
 	aes_mod_init();
+	blake3_mod_init();
 	edonr_mod_init();
 	sha1_mod_init();
 	sha2_mod_init();

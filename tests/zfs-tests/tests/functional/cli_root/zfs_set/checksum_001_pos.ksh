@@ -46,7 +46,7 @@
 verify_runnable "both"
 
 set -A dataset "$TESTPOOL" "$TESTPOOL/$TESTFS" "$TESTPOOL/$TESTVOL"
-set -A values "on" "off" "fletcher2" "fletcher4" "sha256" "sha512" "skein" "noparity"
+set -A values "on" "off" "fletcher2" "fletcher4" "sha256" "sha512" "skein" "noparity" "blake3"
 if is_linux; then
 	values+=("edonr")
 fi

@@ -14,6 +14,9 @@ ASM_SOURCES_C = asm-x86_64/aes/aeskey.c
 ASM_SOURCES_AS = \
 	asm-x86_64/aes/aes_amd64.S \
 	asm-x86_64/aes/aes_aesni.S \
+	asm-x86_64/blake3/blake3_avx2_x86-64_unix.S \
+	asm-x86_64/blake3/blake3_avx512_x86-64_unix.S \
+	asm-x86_64/blake3/blake3_sse41_x86-64_unix.S \
 	asm-x86_64/modes/gcm_pclmulqdq.S \
 	asm-x86_64/modes/aesni-gcm-x86_64.S \
 	asm-x86_64/modes/ghash-x86_64.S \
@@ -37,6 +40,9 @@ KERNEL_C = \
 	algs/aes/aes_impl_x86-64.c \
 	algs/aes/aes_impl.c \
 	algs/aes/aes_modes.c \
+	algs/blake3/blake3.c \
+	algs/blake3/blake3_dispatch.c \
+	algs/blake3/blake3_portable.c \
 	algs/edonr/edonr.c \
 	algs/modes/modes.c \
 	algs/modes/cbc.c \
@@ -53,6 +59,7 @@ KERNEL_C = \
 	algs/skein/skein_iv.c \
 	illumos-crypto.c \
 	io/aes.c \
+	io/blake3_mod.c \
 	io/edonr_mod.c \
 	io/sha1_mod.c \
 	io/sha2_mod.c \

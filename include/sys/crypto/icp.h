@@ -29,6 +29,9 @@
 int aes_mod_init(void);
 int aes_mod_fini(void);
 
+int blake3_mod_init(void);
+int blake3_mod_fini(void);
+
 int edonr_mod_init(void);
 int edonr_mod_fini(void);
 

@@ -23,6 +23,7 @@ $(MODULE)-objs += core/kcf_mech_tabs.o
 $(MODULE)-objs += core/kcf_prov_lib.o
 $(MODULE)-objs += spi/kcf_spi.o
 $(MODULE)-objs += io/aes.o
+$(MODULE)-objs += io/blake3_mod.o
 $(MODULE)-objs += io/edonr_mod.o
 $(MODULE)-objs += io/sha1_mod.o
 $(MODULE)-objs += io/sha2_mod.o
@@ -39,6 +40,9 @@ $(MODULE)-objs += algs/modes/modes.o
 $(MODULE)-objs += algs/aes/aes_impl_generic.o
 $(MODULE)-objs += algs/aes/aes_impl.o
 $(MODULE)-objs += algs/aes/aes_modes.o
+$(MODULE)-objs += algs/blake3/blake3.o
+$(MODULE)-objs += algs/blake3/blake3_dispatch.o
+$(MODULE)-objs += algs/blake3/blake3_portable.o
 $(MODULE)-objs += algs/edonr/edonr.o
 $(MODULE)-objs += algs/sha1/sha1.o
 $(MODULE)-objs += algs/sha2/sha2.o
@@ -56,6 +60,9 @@ $(MODULE)-$(CONFIG_X86_64) += asm-x86_64/modes/ghash-x86_64.o
 $(MODULE)-$(CONFIG_X86_64) += asm-x86_64/sha1/sha1-x86_64.o
 $(MODULE)-$(CONFIG_X86_64) += asm-x86_64/sha2/sha256_impl.o
 $(MODULE)-$(CONFIG_X86_64) += asm-x86_64/sha2/sha512_impl.o
+$(MODULE)-$(CONFIG_X86_64) += asm-x86_64/blake3/blake3_avx2_x86-64_unix.o
+$(MODULE)-$(CONFIG_X86_64) += asm-x86_64/blake3/blake3_avx512_x86-64_unix.o
+$(MODULE)-$(CONFIG_X86_64) += asm-x86_64/blake3/blake3_sse41_x86-64_unix.o
 
 $(MODULE)-$(CONFIG_X86) += algs/modes/gcm_pclmulqdq.o
 $(MODULE)-$(CONFIG_X86) += algs/aes/aes_impl_aesni.o
@@ -76,6 +83,7 @@ ICP_DIRS = \
 	os \
 	algs \
 	algs/aes \
+	algs/blake3 \
 	algs/edonr \
 	algs/modes \
 	algs/sha1 \

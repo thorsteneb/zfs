@@ -570,6 +570,18 @@ zpool_feature_init(void)
 	    "com.datto:resilver_defer", "resilver_defer",
 	    "Support for deferring new resilvers when one is already running.",
 	    ZFEATURE_FLAG_READONLY_COMPAT, ZFEATURE_TYPE_BOOLEAN, NULL);
+
+	{
+	static const spa_feature_t blake3_deps[] = {
+		SPA_FEATURE_EXTENSIBLE_DATASET,
+		SPA_FEATURE_NONE
+	};
+	zfeature_register(SPA_FEATURE_BLAKE3,
+	    "com.delphix:blake3", "blake3",
+	    "BLAKE3 hash algorithm.",
+	    ZFEATURE_FLAG_PER_DATASET, ZFEATURE_TYPE_BOOLEAN,
+	    blake3_deps);
+	}
 }
 
 #if defined(_KERNEL)

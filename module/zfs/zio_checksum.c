@@ -197,6 +197,9 @@ zio_checksum_info_t zio_checksum_table[ZIO_CHECKSUM_FUNCTIONS] = {
 	    ZCHECKSUM_FLAG_METADATA | ZCHECKSUM_FLAG_SALTED |
 	    ZCHECKSUM_FLAG_NOPWRITE, "edonr"},
 #endif
+	{{abd_checksum_blake3_native,	abd_checksum_blake3_byteswap},
+	    NULL, NULL, ZCHECKSUM_FLAG_METADATA | ZCHECKSUM_FLAG_DEDUP |
+	    ZCHECKSUM_FLAG_NOPWRITE, "blake3"},
 };
 
 /*
@@ -217,6 +220,8 @@ zio_checksum_to_feature(enum zio_checksum cksum)
 	case ZIO_CHECKSUM_EDONR:
 		return (SPA_FEATURE_EDONR);
 #endif
+	case ZIO_CHECKSUM_BLAKE3:
+		return (SPA_FEATURE_BLAKE3);
 	default:
 		return (SPA_FEATURE_NONE);
 	}

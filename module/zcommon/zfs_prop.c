@@ -81,6 +81,7 @@ zfs_prop_init(void)
 		{ "noparity",   ZIO_CHECKSUM_NOPARITY },
 		{ "sha512",	ZIO_CHECKSUM_SHA512 },
 		{ "skein",	ZIO_CHECKSUM_SKEIN },
+		{ "blake3",	ZIO_CHECKSUM_BLAKE3 },
 #if !defined(__FreeBSD__)
 
 		{ "edonr",	ZIO_CHECKSUM_EDONR },
@@ -98,6 +99,9 @@ zfs_prop_init(void)
 		{ "sha512",	ZIO_CHECKSUM_SHA512 },
 		{ "sha512,verify",
 				ZIO_CHECKSUM_SHA512 | ZIO_CHECKSUM_VERIFY },
+		{ "blake3",	ZIO_CHECKSUM_BLAKE3 },
+		{ "blake3,verify",
+				ZIO_CHECKSUM_BLAKE3 | ZIO_CHECKSUM_VERIFY },
 		{ "skein",	ZIO_CHECKSUM_SKEIN },
 		{ "skein,verify",
 				ZIO_CHECKSUM_SKEIN | ZIO_CHECKSUM_VERIFY },
@@ -313,7 +317,7 @@ zfs_prop_init(void)
 	    ZFS_TYPE_VOLUME,
 #if !defined(__FreeBSD__)
 	    "on | off | fletcher2 | fletcher4 | sha256 | sha512 | skein"
-	    " | edonr",
+	    " | edonr | blake3",
 #else
 	    "on | off | fletcher2 | fletcher4 | sha256 | sha512 | skein",
 #endif
@@ -322,7 +326,7 @@ zfs_prop_init(void)
 	    PROP_INHERIT, ZFS_TYPE_FILESYSTEM | ZFS_TYPE_VOLUME,
 	    "on | off | verify | sha256[,verify], sha512[,verify], "
 #if !defined(__FreeBSD__)
-	    "skein[,verify], edonr,verify",
+	    "skein[,verify], edonr,verify, blake3[,verify]",
 #else
 	    "skein[,verify]",
 #endif

@@ -126,6 +126,10 @@ extern zio_abd_checksum_func_t fletcher_4_abd_ops;
 extern zio_checksum_t abd_fletcher_4_native;
 extern zio_checksum_t abd_fletcher_4_byteswap;
 
+/* BLAKE3 */
+extern zio_checksum_t abd_checksum_blake3_native;
+extern zio_checksum_t abd_checksum_blake3_byteswap;
+
 extern int zio_checksum_equal(spa_t *, blkptr_t *, enum zio_checksum,
     void *, uint64_t, uint64_t, zio_bad_cksum_t *);
 extern void zio_checksum_compute(zio_t *, enum zio_checksum,
