@@ -2249,11 +2249,18 @@ zio_nowait(zio_t *zio)
 	__zio_execute(zio);
 }
 
+/*
+ * Callers must ensure that this zio completes before the pool is unloaded.
+ * The only mechanism for them to do this is the done callback, so
+ * we verify that it exists.
+ */
 void
 zio_nowait_faster(zio_t *zio)
 {
 	ASSERT3P(zio->io_executor, ==, NULL);
+	ASSERT3P(zio->io_done, !=, NULL);
 
+#if 0
 	if (zio->io_child_type == ZIO_CHILD_LOGICAL &&
 	    zio_unique_parent(zio) == NULL) {
 		zio_t *pio;
@@ -2270,6 +2277,7 @@ zio_nowait_faster(zio_t *zio)
 
 		zio_add_child(pio, zio);
 	}
+#endif
 
 	ASSERT0(zio->io_queued_timestamp);
 	zio->io_queued_timestamp = gethrtime();
