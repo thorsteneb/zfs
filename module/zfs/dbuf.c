@@ -152,6 +152,8 @@ static boolean_t dbuf_undirty(dmu_buf_impl_t *db, dmu_tx_t *tx);
 static void dbuf_write(dbuf_dirty_record_t *dr, arc_buf_t *data, dmu_tx_t *tx);
 static void dbuf_sync_leaf_verify_bonus_dnode(dbuf_dirty_record_t *dr);
 static int dbuf_read_verify_dnode_crypt(dmu_buf_impl_t *db, uint32_t flags);
+static inline int dbuf_findbp(dnode_t *dn, int level, uint64_t blkid,
+    int fail_sparse, dmu_buf_impl_t **parentp, blkptr_t **bpp);
 
 extern inline void dmu_buf_init_user(dmu_buf_user_t *dbu,
     dmu_buf_evict_func_t *evict_func_sync,
@@ -1965,6 +1967,74 @@ dbuf_redirty(dbuf_dirty_record_t *dr)
 			arc_buf_thaw(db->db_buf);
 		}
 	}
+}
+
+dbuf_dirty_record_t *
+dbuf_dirty_directio(dnode_t *dn, uint64_t blkid, dmu_tx_t *tx)
+{
+	dmu_buf_impl_t *parent_db;
+	blkptr_t *bp;
+
+	if (dn->dn_nlevels < 2)
+		return (NULL);
+
+	/* XXX probably want to change this to dbuf_hold_level the parent
+	 * so that it will work before the parent is written out. See toward
+	 * the end of dbuf_dirty() where it checks for NULL db_parent.
+	 */
+	int err = dbuf_findbp(dn, 0, blkid, B_FALSE, &parent_db, &bp);
+	if (err != 0)
+		return (NULL);
+
+	ASSERT3U(parent_db->db_level, >=, 1);
+
+	dbuf_dirty_record_t *parent_dr = dbuf_dirty(parent_db, tx);
+
+	/* XXX assert that there is no dbuf for this blkid? */
+
+	dbuf_dirty_record_t *dr = kmem_zalloc(sizeof (*dr), KM_SLEEP);
+	list_link_init(&dr->dr_dirty_node);
+	list_link_init(&dr->dr_dbuf_node);
+	//mutex_init(&dr->dt.dd.dr_lock, NULL, MUTEX_DEFAULT, NULL);
+	//cv_init(&dr->dt.dd.dr_cv, NULL, CV_DEFAULT, NULL);
+
+	dr->dr_txg = tx->tx_txg;
+	dr->dt.dd.dr_blkid = blkid;
+	dr->dt.dd.dr_bp_in_parent = bp;
+
+	// XXX we could do the compressed size here
+	dr->dr_accounted = dn->dn_datablksz;
+	dmu_objset_willuse_space(dn->dn_objset, dr->dr_accounted, tx);
+
+	/*
+	 * XXX assert that we are not in dn_free_ranges
+	 */
+#if 0
+	mutex_enter(&dn->dn_mtx);
+	if (dn->dn_free_ranges[txgoff] != NULL) {
+		range_tree_clear(dn->dn_free_ranges[txgoff],
+		    db->db_blkid, 1);
+	}
+	mutex_exit(&dn->dn_mtx);
+	db->db_freed_in_flight = FALSE;
+#endif
+
+	ASSERT(!parent_db->db_objset->os_raw_receive ||
+	    dn->dn_maxblkid >= blkid);
+	dnode_new_blkid(dn, blkid, tx, B_TRUE, B_FALSE);
+	ASSERT(dn->dn_maxblkid >= blkid);
+
+	mutex_enter(&parent_dr->dt.di.dr_mtx);
+	ASSERT3U(parent_dr->dr_txg, ==, tx->tx_txg);
+	list_insert_tail(&parent_dr->dt.di.dr_children, dr);
+	mutex_exit(&parent_dr->dt.di.dr_mtx);
+	dr->dr_parent = parent_dr;
+
+	dbuf_rele(parent_db, NULL);
+
+	/* dirtying the indirect block took care of dirtying the dnode. */
+	//dnode_setdirty(dn, tx);
+	return (dr);
 }
 
 dbuf_dirty_record_t *
@@ -3947,6 +4017,155 @@ dbuf_sync_leaf_verify_bonus_dnode(dbuf_dirty_record_t *dr)
 #endif
 }
 
+static void
+dmu_directio_ready(zio_t *zio)
+{
+	dbuf_dirty_record_t *dr = zio->io_private;
+	blkptr_t *bp = zio->io_bp;
+
+	if (zio->io_error != 0)
+		return;
+
+	dmu_buf_impl_t *parent_db = dr->dr_parent->dr_dbuf;
+	DB_DNODE_ENTER(parent_db);
+	dnode_t *dn = DB_DNODE(parent_db);
+
+	blkptr_t *bp_orig = dr->dt.dd.dr_bp_in_parent;
+	spa_t *spa = dmu_objset_spa(dn->dn_objset);
+	int64_t delta;
+
+	delta = bp_get_dsize_sync(spa, bp) - bp_get_dsize_sync(spa, bp_orig);
+	dnode_diduse_space(dn, delta);
+
+	uint64_t blkid = dr->dt.dd.dr_blkid;
+	mutex_enter(&dn->dn_mtx);
+	if (blkid > dn->dn_phys->dn_maxblkid) {
+		ASSERT0(dn->dn_objset->os_raw_receive);
+		dn->dn_phys->dn_maxblkid = blkid;
+	}
+	mutex_exit(&dn->dn_mtx);
+
+	if (!BP_IS_EMBEDDED(bp)) {
+		uint64_t fill = BP_IS_HOLE(bp) ? 0 : 1;
+		BP_SET_FILL(bp, fill);
+	}
+
+	// fill in BP in parent's data
+	rw_enter(&parent_db->db_rwlock, RW_WRITER);
+	*bp_orig = *bp;
+	rw_exit(&parent_db->db_rwlock);
+
+	DB_DNODE_EXIT(parent_db);
+}
+
+static void
+dmu_directio_done(zio_t *zio)
+{
+	dbuf_dirty_record_t *dr = zio->io_private;
+
+	abd_free(dr->dt.dd.dr_abd);
+	dr->dt.dd.dr_abd = NULL;
+	if (zio->io_error == 0) {
+		objset_t *os = dr->dr_parent->dr_dbuf->db_objset;
+		dmu_tx_t *tx = os->os_synctx;
+
+		/*
+		 * Old style holes are filled with all zeros, whereas
+		 * new-style holes maintain their lsize, type, level,
+		 * and birth time (see zio_write_compress). While we
+		 * need to reset the BP_SET_LSIZE() call that happened
+		 * in dmu_sync_ready for old style holes, we do *not*
+		 * want to wipe out the information contained in new
+		 * style holes. Thus, only zero out the block pointer if
+		 * it's an old style hole.
+		 */
+		if (BP_IS_HOLE(&dr->dr_bp_copy) &&
+		    dr->dr_bp_copy.blk_birth == 0)
+			BP_ZERO(&dr->dr_bp_copy);
+
+		dsl_dataset_t *ds = os->os_dsl_dataset;
+		(void) dsl_dataset_block_kill(ds, &zio->io_bp_orig, tx, B_TRUE);
+		dsl_dataset_block_born(ds, zio->io_bp, tx);
+
+		/* XXX we're supposed to do this incrementally in the physdone callback */
+		dsl_pool_undirty_space(dmu_objset_pool(os),
+		    dr->dr_accounted, dmu_tx_get_txg(tx));
+	}
+
+#if 0
+	/*
+	 * For nopwrites and rewrites we ensure that the bp matches our
+	 * original and bypass all the accounting.
+	 */
+	if (zio->io_flags & (ZIO_FLAG_IO_REWRITE | ZIO_FLAG_NOPWRITE)) {
+		ASSERT(BP_EQUAL(bp, bp_orig));
+	} else {
+		dsl_dataset_t *ds = dn->dn_objset->os_dsl_dataset;
+		(void) dsl_dataset_block_kill(ds, &bp_orig_copy, tx, B_TRUE);
+		dsl_dataset_block_born(ds, bp, tx);
+	}
+#endif
+
+
+	kmem_free(dr, sizeof (*dr));
+
+#if 0
+	mutex_enter(&dr->dt.dd.dr_lock);
+	dr->dt.dd.dr_io_err = zio->io_error;
+	ASSERT(dr->dt.dd.dr_io_outstanding);
+	dr->dt.dd.dr_io_outstanding = B_FALSE;
+	cv_broadcast(&dr->dt.dd.dr_cv);
+	mutex_exit(&dr->dt.dd.dr_lock);
+#endif
+}
+
+noinline static void
+dbuf_sync_directio(dbuf_dirty_record_t *dr, dmu_tx_t *tx)
+{
+	dmu_buf_impl_t *parent_db = dr->dr_parent->dr_dbuf;
+	zio_t *pio = dr->dr_parent->dr_zio;
+
+#if 0
+	mutex_enter(&dr->dt.dd.dr_lock);
+	while (dr->dt.dd.dr_io_outstanding) {
+		cv_wait(&dr->dt.dd.dr_cv, &dr->dt.dd.dr_lock);
+	}
+	mutex_exit(&dr->dt.dd.dr_lock);
+#endif
+
+	/* XXX I think if dr_io_err is set, we need to make the parent
+	 * zio fail?
+	 */
+
+	DB_DNODE_ENTER(parent_db);
+	dnode_t *dn = DB_DNODE(parent_db);
+
+	zbookmark_phys_t zb = {
+		.zb_objset = dmu_objset_id(dn->dn_objset),
+		.zb_object = dn->dn_object,
+		.zb_level = 0,
+		.zb_blkid = dr->dt.dd.dr_blkid,
+	};
+
+	/*
+	 * See comment in dbuf_write().  This is so that zio->io_bp_orig
+	 * will have the old BP in dmu_directio_done().
+	 */
+	dr->dr_bp_copy = *dr->dt.dd.dr_bp_in_parent;
+
+	dr->dr_zio = zio_write(pio, dmu_objset_spa(dn->dn_objset),
+	    dmu_tx_get_txg(tx),
+	    &dr->dr_bp_copy, dr->dt.dd.dr_abd, dn->dn_datablksz,
+	    dr->dt.dd.dr_abd->abd_size, &dr->dt.dd.dr_props,
+	    dmu_directio_ready, NULL, NULL, dmu_directio_done, dr,
+	    ZIO_PRIORITY_ASYNC_WRITE, ZIO_FLAG_CANFAIL | dr->dt.dd.dr_flags,
+	    &zb);
+
+	DB_DNODE_EXIT(parent_db);
+
+	zio_nowait(dr->dr_zio);
+}
+
 /*
  * dbuf_sync_leaf() is called recursively from dbuf_sync_list() so it is
  * critical the we not allow the compiler to inline this function in to
@@ -4105,15 +4324,19 @@ dbuf_sync_list(list_t *list, int level, dmu_tx_t *tx)
 			    DMU_META_DNODE_OBJECT);
 			break;
 		}
-		if (dr->dr_dbuf->db_blkid != DMU_BONUS_BLKID &&
-		    dr->dr_dbuf->db_blkid != DMU_SPILL_BLKID) {
-			VERIFY3U(dr->dr_dbuf->db_level, ==, level);
-		}
 		list_remove(list, dr);
-		if (dr->dr_dbuf->db_level > 0)
-			dbuf_sync_indirect(dr, tx);
-		else
-			dbuf_sync_leaf(dr, tx);
+		if (dr->dr_dbuf == NULL) {
+			dbuf_sync_directio(dr, tx);
+		} else {
+			if (dr->dr_dbuf->db_blkid != DMU_BONUS_BLKID &&
+			    dr->dr_dbuf->db_blkid != DMU_SPILL_BLKID) {
+				VERIFY3U(dr->dr_dbuf->db_level, ==, level);
+			}
+			if (dr->dr_dbuf->db_level > 0)
+				dbuf_sync_indirect(dr, tx);
+			else
+				dbuf_sync_leaf(dr, tx);
+		}
 	}
 }
 

@@ -1601,6 +1601,131 @@ dmu_copy_from_buf(objset_t *os, uint64_t object, uint64_t offset,
 	dmu_buf_rele(dst_handle, FTAG);
 }
 
+#if 0
+/* ARGSUSED */
+static void
+dmu_directio_ready(zio_t *zio)
+{
+	blkptr_t *bp = zio->io_bp;
+
+	if (zio->io_error == 0) {
+		ASSERT(BP_GET_LEVEL(bp) == 0);
+		if (!BP_IS_EMBEDDED(bp)) {
+			BP_SET_FILL(bp, 1);
+		}
+	}
+}
+
+/* ARGSUSED */
+static void
+dmu_directio_done(zio_t *zio)
+{
+	dbuf_dirty_record_t *dr = zio->io_private;
+
+	abd_free(dr->dt.dd.dr_abd);
+	dr->dt.dd.dr_abd = NULL;
+	if (zio->io_error == 0) {
+		/*
+		 * Old style holes are filled with all zeros, whereas
+		 * new-style holes maintain their lsize, type, level,
+		 * and birth time (see zio_write_compress). While we
+		 * need to reset the BP_SET_LSIZE() call that happened
+		 * in dmu_sync_ready for old style holes, we do *not*
+		 * want to wipe out the information contained in new
+		 * style holes. Thus, only zero out the block pointer if
+		 * it's an old style hole.
+		 */
+		if (BP_IS_HOLE(&dr->dr_bp_copy) &&
+		    dr->dr_bp_copy.blk_birth == 0)
+			BP_ZERO(&dr->dr_bp_copy);
+	} else {
+		dr->dt.dd.dr_io_err = zio->io_error;
+	}
+
+	mutex_enter(&dr->dt.dd.dr_lock);
+	dr->dt.dd.dr_io_err = zio->io_error;
+	ASSERT(dr->dt.dd.dr_io_outstanding);
+	dr->dt.dd.dr_io_outstanding = B_FALSE;
+	cv_broadcast(&dr->dt.dd.dr_cv);
+	mutex_exit(&dr->dt.dd.dr_lock);
+}
+#endif
+
+/*
+ * The abd is consumed.  We must be writing exactly one block.
+ * XXX I think we need to supply compression/encryption parameters
+ */
+int
+dmu_directio_write_by_dnode(dnode_t *dn, uint64_t offset, abd_t *abd,
+    const zio_prop_t *zp, enum zio_flag flags, dmu_tx_t *tx)
+{
+	objset_t *os = dn->dn_objset;
+
+	rw_enter(&dn->dn_struct_rwlock, RW_READER);
+	dbuf_dirty_record_t *dr =
+	    dbuf_dirty_directio(dn, dbuf_whichblock(dn, 0, offset), tx);
+	rw_exit(&dn->dn_struct_rwlock);
+
+	if (dr == NULL) {
+		arc_buf_t *abuf;
+		if (flags & ZIO_FLAG_RAW_ENCRYPT) {
+			abuf = arc_loan_raw_buf(dmu_objset_spa(os),
+			    dn->dn_object, zp->zp_byteorder, zp->zp_salt,
+			    zp->zp_iv, zp->zp_mac, zp->zp_type,
+			    abd->abd_size, dn->dn_datablksz,
+			    zp->zp_compress);
+		} else if (flags & ZIO_FLAG_RAW_COMPRESS) {
+			abuf = arc_loan_compressed_buf(
+			    dmu_objset_spa(os),
+			    abd->abd_size, dn->dn_datablksz,
+			    zp->zp_compress);
+		} else {
+			abuf = arc_loan_buf(dmu_objset_spa(os),
+			    DMU_OT_IS_METADATA(zp->zp_type),
+			    dn->dn_datablksz);
+		}
+		abd_copy_to_buf(abuf->b_data, abd, abd->abd_size);
+		abd_free(abd);
+		int err = dmu_assign_arcbuf_by_dnode(dn, offset, abuf, tx);
+		if (err != 0) {
+			/* XXX seems wrong.  using dmu routine vs we got it
+			* from arc routine, and it uses FTAG which can't be
+			* right.  but receive_read_record does this for
+			* DRR_SPILL.
+			 */
+			dmu_return_arcbuf(abuf);
+		}
+		return (err);
+
+	}
+	dr->dt.dd.dr_abd = abd;
+	//dr->dt.dd.dr_io_outstanding = B_TRUE;
+	dr->dt.dd.dr_props = *zp;
+	dr->dt.dd.dr_flags = flags;
+
+#if 0
+	zbookmark_phys_t zb = {
+		.zb_objset = dmu_objset_id(dn->dn_objset),
+		.zb_object = dn->dn_object,
+		.zb_level = 0,
+		.zb_blkid = dr->dt.dd.dr_blkid,
+	};
+
+	/*
+	 * Note: we would like to use ZIO_PRIORITY_ASYNC_WRITE, which uses
+	 * the allocation throttle.  However, spa_sync() assumes (and asserts)
+	 * that the allocation throttle is not used outside of syncing
+	 * context.  A good solution might be to hold onto the data until
+	 * syncing context and do the zio_write() there.
+	 */
+	zio_nowait(zio_write(NULL, dmu_objset_spa(os), dmu_tx_get_txg(tx),
+	    &dr->dr_bp_copy, abd, dn->dn_datablksz, abd->abd_size, zp,
+	    dmu_directio_ready, NULL, NULL, dmu_directio_done, dr,
+	    ZIO_PRIORITY_SYNC_WRITE, ZIO_FLAG_CANFAIL | flags, &zb));
+#endif
+	return (0);
+}
+
 /*
  * When possible directly assign passed loaned arc buffer to a dbuf.
  * If this is not possible copy the contents of passed arc buf via

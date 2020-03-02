@@ -75,6 +75,7 @@ struct zio_prop;
 struct sa_handle;
 struct dsl_crypto_params;
 struct locked_range;
+struct zio_prop;
 
 typedef struct objset objset_t;
 typedef struct dmu_tx dmu_tx_t;
@@ -844,6 +845,10 @@ void dmu_write(objset_t *os, uint64_t object, uint64_t offset, uint64_t size,
 	const void *buf, dmu_tx_t *tx);
 void dmu_write_by_dnode(dnode_t *dn, uint64_t offset, uint64_t size,
     const void *buf, dmu_tx_t *tx);
+#if 0
+int dmu_directio_write_by_dnode(dnode_t *dn, uint64_t offset, abd_t *abd,
+    const struct zio_prop *zp, enum zio_flags flags, dmu_tx_t *tx);
+#endif
 void dmu_prealloc(objset_t *os, uint64_t object, uint64_t offset, uint64_t size,
 	dmu_tx_t *tx);
 #ifdef _KERNEL

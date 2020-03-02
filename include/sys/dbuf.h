@@ -171,6 +171,21 @@ typedef struct dbuf_dirty_record {
 			uint8_t	dr_iv[ZIO_DATA_IV_LEN];
 			uint8_t	dr_mac[ZIO_DATA_MAC_LEN];
 		} dl;
+		struct dirty_directio {
+			blkptr_t *dr_bp_in_parent;
+			uint64_t dr_blkid;
+#if 0
+			kmutex_t dr_lock;
+			kcondvar_t dr_cv;
+			boolean_t dr_io_outstanding;
+			int dr_io_err;
+#endif
+			abd_t *dr_abd;
+			zio_prop_t dr_props;
+			enum zio_flag dr_flags;
+
+			// XXX may also need crypt params?
+		} dd;
 	} dt;
 } dbuf_dirty_record_t;
 
@@ -344,6 +359,8 @@ void dmu_buf_will_fill(dmu_buf_t *db, dmu_tx_t *tx);
 void dmu_buf_fill_done(dmu_buf_t *db, dmu_tx_t *tx);
 void dbuf_assign_arcbuf(dmu_buf_impl_t *db, arc_buf_t *buf, dmu_tx_t *tx);
 dbuf_dirty_record_t *dbuf_dirty(dmu_buf_impl_t *db, dmu_tx_t *tx);
+dbuf_dirty_record_t *dbuf_dirty_directio(dnode_t *dn, uint64_t blkid,
+    dmu_tx_t *tx);
 arc_buf_t *dbuf_loan_arcbuf(dmu_buf_impl_t *db);
 void dmu_buf_write_embedded(dmu_buf_t *dbuf, void *data,
     bp_embedded_type_t etype, enum zio_compress comp,

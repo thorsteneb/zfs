@@ -76,10 +76,15 @@ struct receive_record_arg {
 	dmu_replay_record_t header;
 	void *payload; /* Pointer to a buffer containing the payload */
 	/*
-	 * If the record is a write, pointer to the arc_buf_t containing the
+	 * If the record is a SPILL, pointer to the arc_buf_t containing the
 	 * payload.
 	 */
 	arc_buf_t *arc_buf;
+	/*
+	 * If the record is a WRITE, pointer to the abd containing the
+	 * payload.
+	 */
+	abd_t *abd;
 	int payload_size;
 	uint64_t bytes_read; /* bytes read from stream when record created */
 	boolean_t eos_marker; /* Marks the end of the stream */
@@ -92,8 +97,8 @@ struct receive_writer_arg {
 	bqueue_t q;
 
 	/*
-	 * These three args are used to signal to the main thread that we're
-	 * done.
+	 * These three members are used to signal to the main thread when
+	 * we're done.
 	 */
 	kmutex_t mutex;
 	kcondvar_t cv;
@@ -1698,6 +1703,10 @@ receive_freeobjects(struct receive_writer_arg *rwa,
 	return (0);
 }
 
+extern int
+dmu_directio_write_by_dnode(dnode_t *dn, uint64_t offset, abd_t *abd,
+    const zio_prop_t *zp, enum zio_flag flags, dmu_tx_t *tx);
+
 static int
 flush_write_batch_impl(struct receive_writer_arg *rwa)
 {
@@ -1721,8 +1730,9 @@ flush_write_batch_impl(struct receive_writer_arg *rwa)
 
 	while ((rrd = list_remove_head(&rwa->write_batch)) != NULL) {
 		struct drr_write *drrw = &rrd->header.drr_u.drr_write;
-		arc_buf_t *abuf = rrd->arc_buf;
+		abd_t *abd = rrd->abd;
 
+#if 0
 		if (rwa->byteswap && !arc_is_encrypted(abuf) &&
 		    arc_get_compression(abuf) == ZIO_COMPRESS_OFF) {
 			dmu_object_byteswap_t byteswap =
@@ -1730,11 +1740,39 @@ flush_write_batch_impl(struct receive_writer_arg *rwa)
 			dmu_ot_byteswap[byteswap].ob_func(abuf->b_data,
 			    DRR_WRITE_PAYLOAD_SIZE(drrw));
 		}
+#endif
 
-		err = dmu_assign_arcbuf_by_dnode(dn,
-		    drrw->drr_offset, abuf, tx);
+		zio_prop_t zp;
+		dmu_write_policy(rwa->os, dn, 0, 0, &zp);
+
+		enum zio_flag zio_flags = 0;
+
+		if (rwa->raw) {
+			zp.zp_encrypt = B_TRUE;
+			zp.zp_compress = drrw->drr_compressiontype;
+			zp.zp_byteorder = ZFS_HOST_BYTEORDER ^
+			    !!DRR_IS_RAW_BYTESWAPPED(drrw->drr_flags) ^
+			    rwa->byteswap;
+			bcopy(drrw->drr_salt, zp.zp_salt, ZIO_DATA_SALT_LEN);
+			bcopy(drrw->drr_iv, zp.zp_iv, ZIO_DATA_IV_LEN);
+			bcopy(drrw->drr_mac, zp.zp_mac, ZIO_DATA_MAC_LEN);
+			if (DMU_OT_IS_ENCRYPTED(zp.zp_type)) {
+				zp.zp_nopwrite = B_FALSE;
+				zp.zp_copies =
+				    MIN(zp.zp_copies, SPA_DVAS_PER_BP - 1);
+			}
+			zio_flags |= ZIO_FLAG_RAW;
+		} else if (DRR_WRITE_COMPRESSED(drrw)) {
+			ASSERT3U(drrw->drr_compressed_size, >, 0);
+			ASSERT3U(drrw->drr_logical_size, >=,
+			    drrw->drr_compressed_size);
+			zp.zp_compress = drrw->drr_compressiontype;
+			zio_flags |= ZIO_FLAG_RAW_COMPRESS;
+		}
+		err = dmu_directio_write_by_dnode(dn,
+		    drrw->drr_offset, abd, &zp, zio_flags, tx);
 		if (err != 0) {
-			dmu_return_arcbuf(abuf);
+			abd_free(abd);
 			break;
 		}
 
@@ -1766,7 +1804,7 @@ flush_write_batch(struct receive_writer_arg *rwa)
 	if (err != 0) {
 		struct receive_record_arg *rrd;
 		while ((rrd = list_remove_head(&rwa->write_batch)) != NULL) {
-			dmu_return_arcbuf(rrd->arc_buf);
+			abd_free(rrd->abd);
 			kmem_free(rrd, sizeof (*rrd));
 		}
 	}
@@ -2311,10 +2349,12 @@ receive_read_record(dmu_recv_cookie_t *drc)
 	case DRR_WRITE:
 	{
 		struct drr_write *drrw = &drc->drc_rrd->header.drr_u.drr_write;
-		arc_buf_t *abuf;
+		abd_t *abd;
 		boolean_t is_meta = DMU_OT_IS_METADATA(drrw->drr_type);
 
 		if (drc->drc_raw) {
+			abd = abd_alloc_linear(drrw->drr_compressed_size, B_FALSE);
+#if 0
 			boolean_t byteorder = ZFS_HOST_BYTEORDER ^
 			    !!DRR_IS_RAW_BYTESWAPPED(drrw->drr_flags) ^
 			    drc->drc_byteswap;
@@ -2324,27 +2364,34 @@ receive_read_record(dmu_recv_cookie_t *drc)
 			    drrw->drr_iv, drrw->drr_mac, drrw->drr_type,
 			    drrw->drr_compressed_size, drrw->drr_logical_size,
 			    drrw->drr_compressiontype);
+#endif
 		} else if (DRR_WRITE_COMPRESSED(drrw)) {
 			ASSERT3U(drrw->drr_compressed_size, >, 0);
 			ASSERT3U(drrw->drr_logical_size, >=,
 			    drrw->drr_compressed_size);
 			ASSERT(!is_meta);
+			abd = abd_alloc_linear(drrw->drr_compressed_size, B_FALSE);
+#if 0
 			abuf = arc_loan_compressed_buf(
 			    dmu_objset_spa(drc->drc_os),
 			    drrw->drr_compressed_size, drrw->drr_logical_size,
 			    drrw->drr_compressiontype);
+#endif
 		} else {
+			abd = abd_alloc_linear(drrw->drr_logical_size, is_meta);
+#if 0
 			abuf = arc_loan_buf(dmu_objset_spa(drc->drc_os),
 			    is_meta, drrw->drr_logical_size);
+#endif
 		}
 
 		err = receive_read_payload_and_next_header(drc,
-		    DRR_WRITE_PAYLOAD_SIZE(drrw), abuf->b_data);
+		    DRR_WRITE_PAYLOAD_SIZE(drrw), abd_to_buf(abd));
 		if (err != 0) {
-			dmu_return_arcbuf(abuf);
+			abd_free(abd);
 			return (err);
 		}
-		drc->drc_rrd->arc_buf = abuf;
+		drc->drc_rrd->abd = abd;
 		receive_read_prefetch(drc, drrw->drr_object, drrw->drr_offset,
 		    drrw->drr_logical_size);
 		return (err);
@@ -2659,6 +2706,10 @@ receive_writer_thread(void *arg)
 		} else if (rrd->arc_buf != NULL) {
 			dmu_return_arcbuf(rrd->arc_buf);
 			rrd->arc_buf = NULL;
+			rrd->payload = NULL;
+		} else if (rrd->abd != NULL) {
+			abd_free(rrd->abd);
+			rrd->abd = NULL;
 			rrd->payload = NULL;
 		} else if (rrd->payload != NULL) {
 			kmem_free(rrd->payload, rrd->payload_size);
