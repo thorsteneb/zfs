@@ -61,6 +61,7 @@ typedef struct txg_list {
 	kmutex_t	tl_lock;
 	size_t		tl_offset;
 	spa_t		*tl_spa;
+	uint64_t	tl_count;
 	txg_node_t	*tl_head[TXG_SIZE];
 } txg_list_t;
 

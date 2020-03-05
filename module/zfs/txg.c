@@ -834,6 +834,7 @@ txg_list_create(txg_list_t *tl, spa_t *spa, size_t offset)
 
 	tl->tl_offset = offset;
 	tl->tl_spa = spa;
+	tl->tl_count = 0;
 
 	for (t = 0; t < TXG_SIZE; t++)
 		tl->tl_head[t] = NULL;
@@ -879,15 +880,20 @@ txg_list_destroy(txg_list_t *tl)
 boolean_t
 txg_all_lists_empty(txg_list_t *tl)
 {
+	return (tl->tl_count == 0);
+#if 0
 	mutex_enter(&tl->tl_lock);
 	for (int i = 0; i < TXG_SIZE; i++) {
 		if (!txg_list_empty_impl(tl, i)) {
+			ASSERT3U(tl->tl_count, >, 0);
 			mutex_exit(&tl->tl_lock);
 			return (B_FALSE);
 		}
 	}
+	ASSERT3U(tl->tl_count, ==, 0);
 	mutex_exit(&tl->tl_lock);
 	return (B_TRUE);
+#endif
 }
 
 /*
@@ -908,6 +914,7 @@ txg_list_add(txg_list_t *tl, void *p, uint64_t txg)
 		tn->tn_member[t] = 1;
 		tn->tn_next[t] = tl->tl_head[t];
 		tl->tl_head[t] = tn;
+		tl->tl_count++;
 	}
 	mutex_exit(&tl->tl_lock);
 
@@ -938,6 +945,7 @@ txg_list_add_tail(txg_list_t *tl, void *p, uint64_t txg)
 		tn->tn_member[t] = 1;
 		tn->tn_next[t] = NULL;
 		*tp = tn;
+		tl->tl_count++;
 	}
 	mutex_exit(&tl->tl_lock);
 
@@ -963,6 +971,7 @@ txg_list_remove(txg_list_t *tl, uint64_t txg)
 		tl->tl_head[t] = tn->tn_next[t];
 		tn->tn_next[t] = NULL;
 		tn->tn_member[t] = 0;
+		tl->tl_count = 0;
 	}
 	mutex_exit(&tl->tl_lock);
 
@@ -986,6 +995,7 @@ txg_list_remove_this(txg_list_t *tl, void *p, uint64_t txg)
 			*tp = tn->tn_next[t];
 			tn->tn_next[t] = NULL;
 			tn->tn_member[t] = 0;
+			tl->tl_count--;
 			mutex_exit(&tl->tl_lock);
 			return (p);
 		}
