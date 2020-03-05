@@ -4715,9 +4715,10 @@ metaslab_active_mask_verify(metaslab_t *msp)
 
 /* ARGSUSED */
 static uint64_t
-metaslab_group_alloc_normal(metaslab_group_t *mg, zio_alloc_list_t *zal,
+metaslab_group_alloc_normal(metaslab_group_t *mg, int allocator,
+    zio_alloc_list_t *zal,
     uint64_t asize, uint64_t txg, boolean_t want_unique, dva_t *dva, int d,
-    int allocator, boolean_t try_hard)
+    boolean_t try_hard)
 {
 	metaslab_t *msp = NULL;
 	uint64_t offset = -1ULL;
@@ -5032,8 +5033,8 @@ metaslab_group_alloc(metaslab_group_t *mg, zio_alloc_list_t *zal,
 	uint64_t offset;
 	ASSERT(mg->mg_initialized);
 
-	offset = metaslab_group_alloc_normal(mg, zal, asize, txg, want_unique,
-	    dva, d, allocator, try_hard);
+	offset = metaslab_group_alloc_normal(mg, allocator, zal, asize, txg, want_unique,
+	    dva, d, try_hard);
 
 	mutex_enter(&mg->mg_lock);
 	if (offset == -1ULL) {
