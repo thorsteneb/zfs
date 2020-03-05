@@ -204,6 +204,22 @@ struct metaslab_class {
 };
 
 /*
+ * Per-allocator data structure.
+ */
+typedef struct metaslab_group_allocator {
+	uint64_t	mga_cur_max_alloc_queue_depth;
+	zfs_refcount_t	mga_alloc_queue_depth;
+
+	/*
+	 * mga_lock only protects mga_primary/secondary.
+	 * Note lock order: ms_lock > mga_lock > mg_lock
+	 */
+	kmutex_t	mga_lock;
+	metaslab_t	*mga_primary;
+	metaslab_t	*mga_secondary;
+} metaslab_group_allocator_t;
+
+/*
  * Metaslab groups encapsulate all the allocatable regions (i.e. metaslabs)
  * of a top-level vdev. They are linked together to form a circular linked
  * list and can belong to only one metaslab class. Metaslab groups may become
@@ -214,8 +230,6 @@ struct metaslab_class {
  */
 struct metaslab_group {
 	kmutex_t		mg_lock;
-	metaslab_t		**mg_primaries;
-	metaslab_t		**mg_secondaries;
 	avl_tree_t		mg_metaslab_tree;
 	uint64_t		mg_aliquot;
 	boolean_t		mg_allocatable;		/* can we allocate? */
@@ -263,9 +277,8 @@ struct metaslab_group {
 	 * groups are unable to handle their share of allocations.
 	 */
 	uint64_t		mg_max_alloc_queue_depth;
-	uint64_t		*mg_cur_max_alloc_queue_depth;
-	zfs_refcount_t		*mg_alloc_queue_depth;
 	int			mg_allocators;
+	metaslab_group_allocator_t *mg_allocator; /* array */
 	/*
 	 * A metalab group that can no longer allocate the minimum block
 	 * size will set mg_no_free_space. Once a metaslab group is out
