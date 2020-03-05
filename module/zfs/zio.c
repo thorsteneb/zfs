@@ -3401,6 +3401,8 @@ zio_io_to_allocate(spa_t *spa, int allocator)
 	return (zio);
 }
 
+int zio_allocator_region_shift = 10;
+
 static zio_t *
 zio_dva_throttle(zio_t *zio)
 {
@@ -3433,7 +3435,8 @@ zio_dva_throttle(zio_t *zio)
 	 * level, and region to accomplish both of these goals.
 	 */
 	zio->io_allocator = cityhash4(bm->zb_objset, bm->zb_object,
-	    bm->zb_level, bm->zb_blkid >> 20) % spa->spa_alloc_count;
+	    bm->zb_level, bm->zb_blkid >> zio_allocator_region_shift) %
+	    spa->spa_alloc_count;
 	mutex_enter(&spa->spa_alloc_locks[zio->io_allocator]);
 	ASSERT(zio->io_type == ZIO_TYPE_WRITE);
 	zio->io_metaslab_class = mc;
@@ -5023,4 +5026,7 @@ ZFS_MODULE_PARAM(zfs_zio, zio_, dva_throttle_enabled, INT, ZMOD_RW,
 
 ZFS_MODULE_PARAM(zfs_zio, zio_, deadman_log_all, INT, ZMOD_RW,
 	"Log all slow ZIOs, not just those with vdevs");
+
+ZFS_MODULE_PARAM(zfs_zio, zio_, allocator_region_shift, INT, ZMOD_RW,
+	"allocator selection shift");
 /* END CSTYLED */
