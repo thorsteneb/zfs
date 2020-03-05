@@ -4622,7 +4622,7 @@ metaslab_block_alloc(metaslab_t *msp, uint64_t size, uint64_t txg)
  * any problems (a possible exception being if every metaslab is completely full
  * except for the newly-activated metaslab which we fail to examine).
  */
-noinline static metaslab_t *
+noinline metaslab_t *
 find_valid_metaslab(metaslab_group_t *mg, uint64_t activation_weight,
     dva_t *dva, int d, boolean_t want_unique, uint64_t asize, int allocator,
     boolean_t try_hard, zio_alloc_list_t *zal, metaslab_t *search,
