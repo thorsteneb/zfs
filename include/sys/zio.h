@@ -36,6 +36,7 @@
 #include <sys/spa.h>
 #include <sys/txg.h>
 #include <sys/avl.h>
+#include <sys/multilist.h>
 #include <sys/fs/zfs.h>
 #include <sys/zio_impl.h>
 
@@ -483,6 +484,7 @@ struct zio {
 	avl_node_t	io_queue_node;
 	avl_node_t	io_offset_node;
 	avl_node_t	io_alloc_node;
+	multilist_node_t	io_queue_pending_node;
 	zio_alloc_list_t 	io_alloc_list;
 
 	/* Internal pipeline state */

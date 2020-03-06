@@ -232,6 +232,16 @@ vdev_queue_class_tree(vdev_queue_t *vq, zio_priority_t p)
 	return (&vq->vq_class[p].vqc_queued_tree);
 }
 
+static inline boolean_t
+vdev_class_has_queued(vdev_queue_t *vq, zio_priority_t p)
+{
+	if (vq->vq_class[p].vqc_has_pending)
+		return (B_TRUE);
+	if (avl_numnodes(vdev_queue_class_tree(vq, p)) > 0)
+		return (B_TRUE);
+	return (B_FALSE);
+}
+
 static inline avl_tree_t *
 vdev_queue_type_tree(vdev_queue_t *vq, zio_type_t t)
 {
@@ -373,7 +383,7 @@ vdev_queue_class_to_issue(vdev_queue_t *vq)
 
 	/* find a queue that has not reached its minimum # outstanding i/os */
 	for (p = 0; p < ZIO_PRIORITY_NUM_QUEUEABLE; p++) {
-		if (avl_numnodes(vdev_queue_class_tree(vq, p)) > 0 &&
+		if (vdev_class_has_queued(vq, p) &&
 		    vq->vq_class[p].vqc_active <
 		    vdev_queue_class_min_active(p))
 			return (p);
@@ -384,7 +394,7 @@ vdev_queue_class_to_issue(vdev_queue_t *vq)
 	 * maximum # outstanding i/os.
 	 */
 	for (p = 0; p < ZIO_PRIORITY_NUM_QUEUEABLE; p++) {
-		if (avl_numnodes(vdev_queue_class_tree(vq, p)) > 0 &&
+		if (vdev_class_has_queued(vq, p) &&
 		    vq->vq_class[p].vqc_active <
 		    vdev_queue_class_max_active(spa, p))
 			return (p);
@@ -392,6 +402,12 @@ vdev_queue_class_to_issue(vdev_queue_t *vq)
 
 	/* No eligible queued i/os */
 	return (ZIO_PRIORITY_NUM_QUEUEABLE);
+}
+
+static unsigned int
+vdev_queue_multilist_index_func(multilist_t *ml, void *obj)
+{
+	return (((uintptr_t)obj) / 997 % multilist_get_num_sublists(ml));
 }
 
 void
@@ -415,7 +431,6 @@ vdev_queue_init(vdev_t *vd)
 	avl_create(vdev_queue_type_tree(vq, ZIO_TYPE_TRIM),
 	    vdev_queue_offset_compare, sizeof (zio_t),
 	    offsetof(struct zio, io_offset_node));
-
 	for (p = 0; p < ZIO_PRIORITY_NUM_QUEUEABLE; p++) {
 		int (*compfn) (const void *, const void *);
 
@@ -433,6 +448,10 @@ vdev_queue_init(vdev_t *vd)
 		}
 		avl_create(vdev_queue_class_tree(vq, p), compfn,
 		    sizeof (zio_t), offsetof(struct zio, io_queue_node));
+		vq->vq_class[p].vqc_pending_list =
+		    multilist_create(sizeof(zio_t),
+		    offsetof(zio_t, io_queue_pending_node),
+		    vdev_queue_multilist_index_func);
 	}
 
 	vq->vq_last_offset = 0;
@@ -443,8 +462,10 @@ vdev_queue_fini(vdev_t *vd)
 {
 	vdev_queue_t *vq = &vd->vdev_queue;
 
-	for (zio_priority_t p = 0; p < ZIO_PRIORITY_NUM_QUEUEABLE; p++)
+	for (zio_priority_t p = 0; p < ZIO_PRIORITY_NUM_QUEUEABLE; p++) {
 		avl_destroy(vdev_queue_class_tree(vq, p));
+		multilist_destroy(vq->vq_class[p].vqc_pending_list);
+	}
 	avl_destroy(&vq->vq_active_tree);
 	avl_destroy(vdev_queue_type_tree(vq, ZIO_TYPE_READ));
 	avl_destroy(vdev_queue_type_tree(vq, ZIO_TYPE_WRITE));
@@ -460,8 +481,14 @@ vdev_queue_io_add(vdev_queue_t *vq, zio_t *zio)
 	spa_history_kstat_t *shk = &spa->spa_stats.io_history;
 
 	ASSERT3U(zio->io_priority, <, ZIO_PRIORITY_NUM_QUEUEABLE);
+
+	multilist_insert(vq->vq_class[zio->io_priority].vqc_pending_list,
+	    zio);
+
+	/*
 	avl_add(vdev_queue_class_tree(vq, zio->io_priority), zio);
 	avl_add(vdev_queue_type_tree(vq, zio->io_type), zio);
+	*/
 
 	if (shk->kstat != NULL) {
 		mutex_enter(&shk->lock);
@@ -740,6 +767,28 @@ vdev_queue_aggregate(vdev_queue_t *vq, zio_t *zio)
 	return (aio);
 }
 
+static void
+vdev_queue_flush_pending(vdev_queue_t *vq, zio_priority_t p)
+{
+	multilist_t *ml = vq->vq_class[p].vqc_pending_list;
+	/* XXX maybe if we hashed based on the same thing as the allocator,
+	 * then it would be reasonable to flush just one sublist at a time?
+	 */
+	for (int i = 0; i < multilist_get_num_sublists(ml); i++) {
+		multilist_sublist_t *mls = multilist_sublist_lock(ml, i);
+		zio_t *zio;
+		while ((zio = multilist_sublist_head(mls)) != NULL) {
+			multilist_sublist_remove(mls, zio);
+			ASSERT3U(zio->io_priority, ==, p);
+			avl_add(vdev_queue_class_tree(vq, p), zio);
+			avl_add(vdev_queue_type_tree(vq, zio->io_type), zio);
+		}
+		multilist_sublist_unlock(mls);
+	}
+
+	vq->vq_class[p].vqc_has_pending = B_FALSE;
+}
+
 static zio_t *
 vdev_queue_io_to_issue(vdev_queue_t *vq)
 {
@@ -771,6 +820,11 @@ again:
 	zio = avl_nearest(tree, idx, AVL_AFTER);
 	if (zio == NULL)
 		zio = avl_first(tree);
+	if (zio == NULL) {
+		ASSERT(vq->vq_class[p].vqc_has_pending);
+		vdev_queue_flush_pending(vq, p);
+		zio = avl_first(tree);
+	}
 	ASSERT3U(zio->io_priority, ==, p);
 
 	aio = vdev_queue_aggregate(vq, zio);
@@ -923,7 +977,12 @@ vdev_queue_change_io_priority(zio_t *zio, zio_priority_t priority)
 	 * priority.
 	 */
 	tree = vdev_queue_class_tree(vq, zio->io_priority);
-	if (avl_find(tree, zio, NULL) == zio) {
+	zio_t *found = avl_find(tree, zio, NULL);
+	if (found == NULL) {
+		vdev_queue_flush_pending(vq, zio->io_priority);
+		found = avl_find(tree, zio, NULL);
+	}
+	if (found == zio) {
 		avl_remove(vdev_queue_class_tree(vq, zio->io_priority), zio);
 		zio->io_priority = priority;
 		avl_add(vdev_queue_class_tree(vq, zio->io_priority), zio);

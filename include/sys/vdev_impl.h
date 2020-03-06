@@ -137,6 +137,8 @@ typedef struct vdev_queue_class {
 	 * LBA-ordered vs FIFO.
 	 */
 	avl_tree_t	vqc_queued_tree;
+	multilist_t	*vqc_pending_list; /* zio's to be added to avl's */
+	boolean_t	vqc_has_pending;
 } vdev_queue_class_t;
 
 struct vdev_queue {
